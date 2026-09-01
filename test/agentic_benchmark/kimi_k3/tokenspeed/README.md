@@ -56,10 +56,16 @@ acceptance drifts between runs. Measured across identical-config runs:
 TPOT +-7%, Decoded Tok/Iter +-13%. Differences smaller than ~10% need
 repeated sweeps before ranking two configs.
 
+`collect_outputs.py` recomputes `Decoded Tok/Iter` from each run's
+`benchmark_data.db` as `sum(completion_tokens - 1) /
+sum(len(inter_token_latencies))` over successful requests. Keep the database
+beside `benchmark_summary.json`: the summary's per-request mean overweights
+high-accept requests because they complete in fewer decode iterations.
+
 Cross-model caveat: this directory pins evalscope `acd09b44` (kimi_k2.5 pins
-`9d052ca0`). TPOT and Decoded Tok/Iter are verified identical between the two
-pins (same formulas and aggregation; the summary keys merely dropped the
-"Avg " prefix); the remaining columns are unverified between pins.
+`9d052ca0`). TPOT is verified identical between the two pins. Decoded Tok/Iter
+uses the database formula above instead of either pin's summary aggregation;
+the remaining columns are unverified between pins.
 
 To verify the parallelism actually applied, grep the server log:
 ```bash
