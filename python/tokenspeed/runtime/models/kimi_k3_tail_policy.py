@@ -33,7 +33,7 @@ class K3MoETailTier(IntEnum):
     """How the K3 MoE tail combines routed/shared partials, best first.
 
     The first four entries retain the original selector's priority. The two
-    deferred entries are opt-in overrides applied by ``select_bt_ht_first_half``.
+    deferred entries are capability-based choices from ``select_bt_ht_first_half``.
     Values never escape the process (identity comparisons, no serialization).
     """
 
@@ -124,7 +124,6 @@ def select_bt_ht_first_half(
     *,
     original: K3MoETailTier,
     num_tokens: int,
-    enabled: bool,
     bt_ok: bool,
     ht_ok: bool,
 ) -> K3MoETailTier:
@@ -133,14 +132,13 @@ def select_bt_ht_first_half(
     Args:
         original: Tier chosen by the original main policy.
         num_tokens: Rank-uniform actual/padded token count.
-        enabled: Collectively agreed first-half opt-in and eligible plan.
         bt_ok: Prepared BT workspace supports this token count.
         ht_ok: Prepared HT workspace supports this token count.
 
     Returns:
         Original small/fallback tier, or BT/HT with the original second half.
     """
-    if original is K3MoETailTier.TAIL_FUSION or not enabled:
+    if original is K3MoETailTier.TAIL_FUSION:
         return original
     if TAIL_FUSION_MAX_TOKENS < num_tokens <= MNNVL_BT_MAX_TOKENS and bt_ok:
         return K3MoETailTier.MNNVL_BT_DEFERRED

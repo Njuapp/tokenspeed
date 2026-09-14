@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1320" height="740" viewBox="0 0 1320 740" role="img" aria-labelledby="title desc">
+  <!--
+  Copyright (c) 2026 LightSeek Foundation
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in
+  all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+  -->
+  <title id="title">Kimi-K3: replace only the routed first half with BT or HT</title>
+  <desc id="desc">Before: standalone finalize, AllReduce one, and RMSNorm. Now: three PDL-chained BT kernels for M33 to 1024, or one warp-specialized persistent HT kernel for M1025 to 8192. All paths feed the unchanged second half: shared-owner plus residual, sharded cuBLAS addmm, and the original AllReduce two. Small-M fusion and unsupported fallbacks are unchanged. The diagram is structural, not a latency chart.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#52627b"/></marker>
+    <style>
+      text { font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; fill: #17253d; }
+      .title { font-size: 30px; font-weight: 700; }
+      .subtitle { font-size: 17px; fill: #52627b; }
+      .label { font-size: 20px; font-weight: 700; }
+      .body { font-size: 17px; }
+      .small { font-size: 15px; fill: #52627b; }
+      .arrow { fill: none; stroke: #52627b; stroke-width: 2; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <rect width="1320" height="740" rx="20" fill="#f8fafc"/>
+  <text x="36" y="53" class="title">Kimi-K3: replace the first half, keep the second half</text>
+  <text x="36" y="84" class="subtitle">Automatic capability-based dispatch · BF16 · TP8 · latent H=3584 · hidden H=7168 · top-k=16</text>
+  <text x="210" y="133" class="small">Input: routed expert GEMM rows, weights and row indices</text>
+  <rect x="204" y="166" width="716" height="110" rx="14" fill="#edf1f6" stroke="#ccd5e1"/>
+  <text x="36" y="210" class="label">Before</text>
+  <text x="36" y="239" class="small">Original first half</text>
+  <rect x="224" y="188" width="192" height="65" rx="10" fill="white" stroke="#ccd5e1"/>
+  <text x="320" y="227" text-anchor="middle" class="body">Finalize</text>
+  <path d="M 421 220 H 457" class="arrow"/>
+  <rect x="466" y="188" width="192" height="65" rx="10" fill="white" stroke="#ccd5e1"/>
+  <text x="562" y="227" text-anchor="middle" class="body">AllReduce #1</text>
+  <path d="M 664 220 H 700" class="arrow"/>
+  <rect x="708" y="188" width="192" height="65" rx="10" fill="white" stroke="#ccd5e1"/>
+  <text x="804" y="227" text-anchor="middle" class="body">RMSNorm</text>
+  <text x="36" y="357" class="label">BT · 3 kernels</text>
+  <text x="36" y="385" class="small">33 ≤ M ≤ 1024</text>
+  <rect x="204" y="310" width="716" height="138" rx="14" fill="#e9f1ff" stroke="#8db4ef"/>
+  <rect x="224" y="337" width="198" height="87" rx="10" fill="white" stroke="#8db4ef"/>
+  <text x="238" y="359" class="small">K1</text>
+  <text x="323" y="385" text-anchor="middle" class="body">Finalize + unicast</text>
+  <text x="323" y="409" text-anchor="middle" class="small">to shard owners</text>
+  <path d="M 427 380 H 458" class="arrow"/>
+  <text x="442" y="333" text-anchor="middle" class="small">PDL</text>
+  <rect x="466" y="337" width="198" height="87" rx="10" fill="white" stroke="#8db4ef"/>
+  <text x="480" y="359" class="small">K2</text>
+  <text x="565" y="385" text-anchor="middle" class="body">Lamport reduce</text>
+  <text x="565" y="409" text-anchor="middle" class="small">+ STMC broadcast</text>
+  <path d="M 669 380 H 700" class="arrow"/>
+  <text x="684" y="333" text-anchor="middle" class="small">PDL</text>
+  <rect x="708" y="337" width="192" height="87" rx="10" fill="white" stroke="#8db4ef"/>
+  <text x="722" y="359" class="small">K3</text>
+  <text x="804" y="385" text-anchor="middle" class="body">Lamport read</text>
+  <text x="804" y="409" text-anchor="middle" class="small">+ RMSNorm</text>
+  <text x="36" y="551" class="label">HT · 1 kernel</text>
+  <text x="36" y="579" class="small">1025 ≤ M ≤ 8192</text>
+  <rect x="204" y="482" width="716" height="160" rx="14" fill="#e5f5f0" stroke="#79b9a5"/>
+  <text x="224" y="511" class="label">Persistent CTA · warp-specialized pipeline</text>
+  <rect x="224" y="531" width="145" height="52" rx="9" fill="white" stroke="#79b9a5"/>
+  <text x="296" y="563" text-anchor="middle" class="body">Loader</text>
+  <rect x="382" y="531" width="170" height="52" rx="9" fill="white" stroke="#79b9a5"/>
+  <text x="467" y="563" text-anchor="middle" class="body">Finalize / RMS</text>
+  <rect x="565" y="531" width="145" height="52" rx="9" fill="white" stroke="#79b9a5"/>
+  <text x="637" y="563" text-anchor="middle" class="body">Publisher</text>
+  <rect x="723" y="531" width="177" height="52" rx="9" fill="white" stroke="#79b9a5"/>
+  <text x="811" y="563" text-anchor="middle" class="body">Reduction</text>
+  <text x="224" y="616" class="body">Overlap compute and communication · LDMC reduce + STMC publish</text>
+  <path d="M 923 220 H 997" class="arrow"/>
+  <path d="M 923 380 H 997" class="arrow"/>
+  <path d="M 923 558 H 997" class="arrow"/>
+  <rect x="1006" y="166" width="278" height="476" rx="14" fill="white" stroke="#ccd5e1" stroke-width="2"/>
+  <text x="1145" y="203" text-anchor="middle" class="label">Unchanged second half</text>
+  <text x="1145" y="234" text-anchor="middle" class="small">Input: normalized [M, 3584]</text>
+  <rect x="1026" y="269" width="238" height="71" rx="9" fill="#edf1f6"/>
+  <text x="1145" y="298" text-anchor="middle" class="body">Shared owner + residual</text>
+  <text x="1145" y="322" text-anchor="middle" class="small">896-column slice · BF16</text>
+  <path d="M 1145 347 V 375" class="arrow"/>
+  <rect x="1026" y="387" width="238" height="71" rx="9" fill="#edf1f6"/>
+  <text x="1145" y="416" text-anchor="middle" class="body">Sharded up-proj</text>
+  <text x="1145" y="440" text-anchor="middle" class="small">Original cuBLAS addmm_</text>
+  <path d="M 1145 465 V 493" class="arrow"/>
+  <rect x="1026" y="505" width="238" height="71" rx="9" fill="#edf1f6"/>
+  <text x="1145" y="534" text-anchor="middle" class="body">Original AllReduce #2</text>
+  <text x="1145" y="558" text-anchor="middle" class="small">Original backend / output lifetime</text>
+  <text x="1145" y="615" text-anchor="middle" class="small">No new fused up / RS / AG</text>
+  <text x="36" y="687" class="body">M ≤ 32: existing TAIL_FUSION eligibility and kernel unchanged. Unsupported / out-of-range: original path.</text>
+  <text x="36" y="718" class="small">Structure only, not a latency chart. Shared and residual remain outside BT/HT. M is the actual/padded kernel row count.</text>
+</svg>

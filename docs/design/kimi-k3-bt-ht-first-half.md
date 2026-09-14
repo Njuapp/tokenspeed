@@ -1,16 +1,32 @@
 # Kimi-K3 BT/HT first-half optimization
 
-This opt-in path changes only routed-expert finalize, the first all-reduce
-(AR1), and latent RMSNorm. Enable it before constructing the model:
+BT/HT replaces routed-expert finalize, the first all-reduce (AR1), and latent
+RMSNorm automatically when the model, device and backend capabilities match.
+There is no environment switch or extra serving option. Unsupported
+configurations retain the existing path.
 
-```bash
-export TOKENSPEED_K3_BT_HT=1
-```
+This change does not introduce a fused up projection, ReduceScatter or
+AllGather in the second half. Model forward, scheduler, graph configuration
+and agentic benchmark files are unchanged.
 
-Unset the variable, or set it to `0`, for main's original dispatch. The flag
-does not enable a fused up projection, ReduceScatter or AllGather. Model
-forward, scheduler, graph configuration and agentic benchmark files are
-unchanged by this PR.
+![First-half replacement and unchanged second half](../images/kimi-k3-bt-ht-first-half.svg)
+
+## Protocol structure
+
+The implementation follows [FlashInfer PR #4358](https://github.com/flashinfer-ai/flashinfer/pull/4358),
+specialized for K3's routed latent tensor rather than the full hidden tensor.
+
+- **BT: three PDL-chained kernels.** Finalize and unicast contributions to
+  shard owners; Lamport-reduce owner-local contributions and multicast the
+  prenorm values with STMC; Lamport-read/materialize and run RMSNorm.
+- **HT: one persistent kernel.** Loader, finalize/RMS, publisher and reduction
+  warp roles pipeline work. LDMC reduces contributions across ranks, and STMC
+  publishes the prenorm values consumed by RMSNorm.
+
+These counts cover only the first half, excluding the expert GEMM and the
+unchanged second half. Unlike the upstream general fusion pattern, neither
+shared-expert addition nor residual addition is enabled in these kernels:
+both belong to K3's second half. Upstream default M thresholds are not reused.
 
 ## Dispatch and second-half contract
 
@@ -55,7 +71,7 @@ The retained presets are:
 - HT: 448 consumer threads, 1 vector/thread, 10 stages, 2 reduction warps,
   2 RMS token groups, 3 RMS pipeline stages, PDL enabled.
 
-There is no kernel retuning in this extraction. The fixed application contract
+The fixed application contract
 is BF16, latent 3584, hidden 7168, top-k 16, TP8/EP1, DP1/CP1, sharded up
 projection and a deferred-capable producer. It also requires a WORLD-spanning
 multicast-capable Blackwell group, the validated FlashInfer 0.6.18 API and PDL.
@@ -80,7 +96,7 @@ small-M latent-tail resources and original multimem staging buffers remain.
 BT/HT still has its own memory cost: removing the second-half allocations does
 not establish memory neutrality or predict an exact KV-capacity recovery.
 
-## Validation and benchmark scope
+## Validation
 
 CPU-only checks, which do not require optional GPU packages:
 
@@ -91,9 +107,10 @@ PYTHONPATH=python python -m pytest --noconftest \
   tokenspeed-kernel/test/thirdparty/test_mnnvl_first_half_host_contracts.py -q
 ```
 
-The tests cover continuous routing, small-M priority, decode's original AR2,
-rank disagreement, capture rejection, retained tuning/resource validation,
-no second-half allocation, and both BT/HT second-half operation orders.
+The tests cover automatic capability-based selection, continuous routing,
+small-M priority, decode's original AR2, rank disagreement, capture rejection,
+retained tuning/resource validation, no second-half allocation, and both
+BT/HT second-half operation orders.
 
 On a separately allocated and configured TP8 fabric:
 
@@ -105,24 +122,12 @@ timeout 20m torchrun --standalone --nproc-per-node=8 \
 Use the normal rendezvous/node arguments for multi-node TP8. This synthetic
 real-communication smoke exercises eager/128 graph replays, changed inputs
 and weights, boundary M values and two layer slots under unchanged numerical
-limits. It is not a real SiTU-producer or serving benchmark. GPU and full-model
-validation of this extracted branch remain pending; old full-fusion results
-must not be attributed to it. First-half reduction association can still
-change logits, so removing second-half fusion is not a numerical pass.
+limits. It is not a real SiTU-producer or serving benchmark. The smoke is
+provided for device validation; it has not been rerun for this default-path
+change. No new performance benchmark is included or claimed in this change.
+Upstream performance figures describe different shapes and are not evidence
+of K3 end-to-end speedup.
 
-Formal performance acceptance compares the combined BT/HT first-half change
-against unmodified main under the original K3 + EAGLE3 agentic protocol, not
-an isolated BT cohort. Preserve the frozen EvalScope client and dataset,
-CC 1/2/4/8/16 with 4/8/8/16/32 conversations, held-out warmup at offset 68,
-500 generated tokens per turn and genuine generated conversation histories.
-The original server protocol uses TP8, FP8 KV, EAGLE3 steps 3/draft 4/top-k 1,
-prefill chunk 8192, prefill graph cap 2048, the K3 reasoning parser and disabled
-KV store. Do not silently replace it with graph cap 8192 or passthrough parsing.
-Freeze any seed and runtime-version controls explicitly and equally for both
-arms, and report differences from the historical reference. The repository's
-benchmark script/configuration is unchanged here; a strict launcher must
-resolve its effective settings against that reference before launch.
-
-This branch makes no new serving speedup or model-quality claim and remains
-disabled by default. Numerical/task-quality qualification is separate from
-performance-only comparison.
+First-half reduction association and BF16 rounding can differ from the
+original path. CPU tests do not establish distributed numerical correctness
+or whole-model equivalence; full-model numerical qualification remains open.

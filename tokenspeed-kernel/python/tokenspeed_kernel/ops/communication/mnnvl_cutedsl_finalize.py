@@ -27,8 +27,8 @@ execution remain behind the third-party adapter boundary.
 
 The wrapper deliberately exposes a caller-selected candidate token range and
 tuning routes.  It raises outside that range, allowing runtime dispatch to keep
-the established materialize/finalize/all-reduce path as a safe fallback until
-each range has passed numerical and performance qualification.
+the established materialize/finalize/all-reduce path for unsupported shapes
+and configurations.
 """
 
 from __future__ import annotations

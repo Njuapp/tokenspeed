@@ -152,7 +152,6 @@ def main():
     device = torch.device("cuda", local)
     dist.init_process_group("nccl", timeout=timedelta(seconds=300))
     assert dist.get_world_size() == 8
-    os.environ["TOKENSPEED_K3_BT_HT"] = "1"
     global_server_args_dict.update(disable_pdl=False)
     mapping = SimpleNamespace(
         moe=SimpleNamespace(
@@ -210,8 +209,8 @@ def main():
     assert all(c.state.mnnvl_bt_deferred is not None for c in candidate)
     assert all(c.state.mnnvl_ht_deferred is not None for c in candidate)
     assert candidate[0].state is candidate[1].state
-    # A separate process-wide-equivalent control state keeps its own BT/HT
-    # mailboxes. No live singleton or candidate workspace is reconfigured.
+    # A test-only control state selects the original path without constructing
+    # BT/HT mailboxes. No live singleton or candidate workspace is reconfigured.
     baseline_state = K3MoeTailCommState(
         mapping=mapping,
         hidden_size=7168,
@@ -219,7 +218,7 @@ def main():
         top_k=16,
         rms_eps=1e-5,
         allow_latent_tail=False,
-        first_half_enabled=False,
+        first_half_eligible=False,
         first_half_capacity=0,
     )
     baseline = []

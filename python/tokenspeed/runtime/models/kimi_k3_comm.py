@@ -37,16 +37,16 @@ multimem AR window      ``MULTIMEM_AR_MIN_TOKENS..MAX`` (prefill)
 fused-lane one-shot     everything else with a fused plan
 ======================  =========================================
 
-The opt-in first-half policy runs after this original selector. It preserves
-the small-tail decision and uses BT finalize/AR1/RMSNorm through M1024 and HT
-through M8192. Projection, owner arithmetic and AR2 retain main's implementation.
+The capability-selected first-half policy runs after this original selector.
+It preserves the small-tail decision and uses BT finalize/AR1/RMSNorm through
+M1024 and HT through M8192. Projection, owner arithmetic and AR2 retain main's
+implementation.
 See ``docs/design/kimi-k3-bt-ht-first-half.md``.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 
 import torch
@@ -194,7 +194,7 @@ class K3MoeTailCommState:
         top_k: int,
         rms_eps: float,
         allow_latent_tail: bool,
-        first_half_enabled: bool,
+        first_half_eligible: bool,
         first_half_capacity: int,
     ) -> "K3MoeTailCommState":
         if cls._instance is None:
@@ -205,7 +205,7 @@ class K3MoeTailCommState:
                 top_k=top_k,
                 rms_eps=rms_eps,
                 allow_latent_tail=allow_latent_tail,
-                first_half_enabled=first_half_enabled,
+                first_half_eligible=first_half_eligible,
                 first_half_capacity=first_half_capacity,
             )
         else:
@@ -216,7 +216,7 @@ class K3MoeTailCommState:
                 or inst.top_k != top_k
                 or inst.rms_eps != float(rms_eps)
                 or inst.allow_latent_tail != allow_latent_tail
-                or inst.first_half_enabled != first_half_enabled
+                or inst.first_half_eligible != first_half_eligible
                 or inst.first_half_capacity != first_half_capacity
             ):
                 # The singleton would otherwise silently hand a second model
@@ -245,7 +245,7 @@ class K3MoeTailCommState:
         top_k,
         rms_eps,
         allow_latent_tail,
-        first_half_enabled,
+        first_half_eligible,
         first_half_capacity,
     ):
         self.hidden_size = hidden_size
@@ -253,7 +253,7 @@ class K3MoeTailCommState:
         self.top_k = top_k
         self.rms_eps = float(rms_eps)
         self.allow_latent_tail = allow_latent_tail
-        self.first_half_enabled = first_half_enabled
+        self.first_half_eligible = first_half_eligible
         self.first_half_capacity = first_half_capacity
         self.mnnvl_bt_deferred = None
         self.mnnvl_ht_deferred = None
@@ -332,13 +332,13 @@ class K3MoeTailCommState:
         group = dist.group.WORLD
         # Negotiate config before any conditional allocator or backend probe.
         identities = [None] * dist.get_world_size(group)
-        identity = (self.first_half_enabled, self.first_half_capacity)
+        identity = (self.first_half_eligible, self.first_half_capacity)
         dist.all_gather_object(identities, identity, group=group)
         if any(x != identity for x in identities):
             raise RuntimeError(
                 f"rank-inconsistent first-half configuration: {identities}"
             )
-        if not self.first_half_enabled:
+        if not self.first_half_eligible:
             return
         capacity = self.first_half_capacity
         common = (
@@ -546,7 +546,7 @@ class TailPlan:
         tier: The negotiated tail tier for this token count.
         defer_finalize: The experts kernel must run with
             ``do_finalize=False`` (the tail owns finalize). Set for
-            TAIL_FUSION when armed to inline finalize, and the opt-in BT/HT
+            TAIL_FUSION when armed to inline finalize, and the BT/HT
             first-half tiers (trtllm fused-AR deployments).
         lane: Pre-materialized fused-lane buffer, or None; when set the
             experts kernel writes its routed partial into
@@ -645,9 +645,8 @@ class K3MoeTailComm:
         execution_plan,
         experts_supports_deferred_finalize: bool,
     ) -> None:
-        enabled = (
-            os.environ.get("TOKENSPEED_K3_BT_HT", "0") == "1"
-            and execution_plan.fused_moe_ar
+        first_half_eligible = (
+            execution_plan.fused_moe_ar
             and up_proj.shard_group is not None
             and experts_supports_deferred_finalize
             and routed_norm is not None
@@ -664,8 +663,8 @@ class K3MoeTailComm:
             allow_latent_tail=(
                 not execution_plan.use_native and routed_norm is not None
             ),
-            first_half_enabled=enabled,
-            first_half_capacity=8192 if enabled else 0,
+            first_half_eligible=first_half_eligible,
+            first_half_capacity=(MULTIMEM_AR_MAX_TOKENS if first_half_eligible else 0),
         )
         self.mapping = mapping
         self.hidden_size = hidden_size
@@ -753,7 +752,6 @@ class K3MoeTailComm:
         tier = select_bt_ht_first_half(
             original=original,
             num_tokens=num_tokens,
-            enabled=self.state.first_half_enabled,
             bt_ok=(
                 self.state.mnnvl_bt_deferred is not None
                 and self.state.mnnvl_bt_deferred.supports_num_tokens(num_tokens)

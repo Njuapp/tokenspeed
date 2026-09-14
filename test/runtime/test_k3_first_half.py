@@ -55,27 +55,27 @@ def original(m, graph, decode):
 
 
 class FirstHalfPolicyTests(unittest.TestCase):
-    def test_every_integer_and_disabled_or_missing_backends(self):
+    def test_every_integer_and_missing_backends(self):
         for graph in (False, True):
             for decode in (False, True):
                 for m in range(8194):
                     base = original(m, graph, decode)
-                    for enabled, bt, ht in (
-                        (True, True, True),
-                        (False, True, True),
-                        (True, False, False),
+                    for bt, ht in (
+                        (True, True),
+                        (False, False),
+                        (True, False),
+                        (False, True),
                     ):
                         result = policy.select_bt_ht_first_half(
                             original=base,
                             num_tokens=m,
-                            enabled=enabled,
                             bt_ok=bt,
                             ht_ok=ht,
                         )
                         expected = base
-                        if enabled and bt and 33 <= m <= 1024:
+                        if bt and 33 <= m <= 1024:
                             expected = policy.K3MoETailTier.MNNVL_BT_DEFERRED
-                        elif enabled and ht and 1025 <= m <= 8192:
+                        elif ht and 1025 <= m <= 8192:
                             expected = policy.K3MoETailTier.MNNVL_HT_DEFERRED
                         self.assertIs(result, expected, (m, graph, decode))
 
@@ -85,7 +85,6 @@ class FirstHalfPolicyTests(unittest.TestCase):
                 policy.select_bt_ht_first_half(
                     original=policy.K3MoETailTier.TAIL_FUSION,
                     num_tokens=m,
-                    enabled=True,
                     bt_ok=True,
                     ht_ok=True,
                 ),
@@ -108,7 +107,6 @@ class FirstHalfPolicyTests(unittest.TestCase):
             latent_tail=None,
             execution_plan=SimpleNamespace(fused_moe_ar=True, join_moe_reduce=False),
             state=SimpleNamespace(
-                first_half_enabled=True,
                 multimem_ar_ok=True,
                 mnnvl_bt_deferred=SimpleNamespace(
                     supports_num_tokens=lambda m: 33 <= m <= 1024
@@ -132,10 +130,9 @@ class FirstHalfPolicyTests(unittest.TestCase):
                     ),
                 )
 
-    def test_constructor_uses_new_opt_in_without_allocating_per_layer_outputs(self):
+    def test_constructor_selects_capable_plans_without_an_environment_switch(self):
         records = []
         state = SimpleNamespace(latent_tail_ok=False)
-        env = {}
         config = {"disable_pdl": False}
 
         def get(**kwargs):
@@ -145,7 +142,6 @@ class FirstHalfPolicyTests(unittest.TestCase):
         init = comm_method(
             "__init__",
             dict(
-                os=SimpleNamespace(environ=env),
                 global_server_args_dict=config,
                 K3MoeTailCommState=SimpleNamespace(get=get),
             ),
@@ -164,26 +160,50 @@ class FirstHalfPolicyTests(unittest.TestCase):
             execution_plan=SimpleNamespace(fused_moe_ar=True, use_native=False),
             experts_supports_deferred_finalize=True,
         )
-        for enabled in (False, True):
-            env["TOKENSPEED_K3_BT_HT"] = "1" if enabled else "0"
-            for _ in range(2):
-                obj = SimpleNamespace()
-                init(obj, **args)
-                self.assertIs(obj.state, state)
-                self.assertEqual(records[-1]["first_half_enabled"], enabled)
-                self.assertEqual(
-                    records[-1]["first_half_capacity"], 8192 if enabled else 0
-                )
-                self.assertNotIn("fused_tail_output", vars(obj))
-        for field in ("disable_pdl", "no_deferred", "replicated"):
+        # No os/environ test double: eligible plans must select BT/HT without
+        # reading an environment variable or allocating a per-layer output.
+        for _ in range(2):
+            obj = SimpleNamespace()
+            init(obj, **args)
+            self.assertIs(obj.state, state)
+            self.assertTrue(records[-1]["first_half_eligible"])
+            self.assertEqual(records[-1]["first_half_capacity"], 8192)
+            self.assertNotIn("fused_tail_output", vars(obj))
+        for field in (
+            "disable_pdl",
+            "no_deferred",
+            "replicated",
+            "no_fused_plan",
+            "no_norm",
+            "tp4",
+            "ep2",
+        ):
             changed = dict(args)
             config["disable_pdl"] = field == "disable_pdl"
             if field == "no_deferred":
                 changed["experts_supports_deferred_finalize"] = False
             if field == "replicated":
                 changed["up_proj"] = SimpleNamespace(shard_group=None)
+            if field == "no_fused_plan":
+                changed["execution_plan"] = SimpleNamespace(
+                    fused_moe_ar=False, use_native=False
+                )
+            if field == "no_norm":
+                changed["routed_norm"] = None
+            if field in ("tp4", "ep2"):
+                changed["mapping"] = SimpleNamespace(
+                    moe=SimpleNamespace(
+                        tp_size=4 if field == "tp4" else 8,
+                        ep_size=2 if field == "ep2" else 1,
+                    )
+                )
             init(SimpleNamespace(), **changed)
-            self.assertFalse(records[-1]["first_half_enabled"])
+            self.assertFalse(records[-1]["first_half_eligible"])
+            self.assertEqual(records[-1]["first_half_capacity"], 0)
+
+    def test_runtime_does_not_read_a_bt_ht_environment_flag(self):
+        self.assertNotIn("TOKENSPEED_K3_BT_HT", COMM.read_text())
+        self.assertNotIn("enabled", policy.select_bt_ht_first_half.__annotations__)
 
     def test_no_second_half_fusion_dependencies_in_runtime(self):
         source = COMM.read_text()
@@ -419,7 +439,7 @@ class FirstHalfPolicyTests(unittest.TestCase):
             moe=SimpleNamespace(tp_size=8, ep_size=1, tp_ep_size=8)
         )
         instance = SimpleNamespace(
-            first_half_enabled=True,
+            first_half_eligible=True,
             first_half_capacity=8192,
             multimem_ar_ok=True,
             hidden_size=7168,
@@ -446,7 +466,7 @@ class FirstHalfPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "must precede"):
             method(instance, mapping)
         control.update(capture=False, disagree=False)
-        instance.first_half_enabled = False
+        instance.first_half_eligible = False
         method(instance, mapping)
         self.assertEqual(builds, [])
 
