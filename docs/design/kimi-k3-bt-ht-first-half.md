@@ -104,7 +104,7 @@ CPU-only checks, which do not require optional GPU packages:
 PYTHONPATH=python python -m pytest --noconftest \
   test/runtime/test_k3_moe_tail_tier.py \
   test/runtime/test_k3_first_half.py \
-  tokenspeed-kernel/test/thirdparty/test_mnnvl_first_half_host_contracts.py -q
+  tokenspeed-kernel/test/nvidia/test_mnnvl_first_half_host_contracts.py -q
 ```
 
 The tests cover automatic capability-based selection, continuous routing,

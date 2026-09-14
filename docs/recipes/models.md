@@ -37,7 +37,6 @@ ts serve \
     --enable-prefix-caching \
     --disable-kvstore \
     --block-size 128 \
-    --enable-cache-report \
     --speculative-algorithm MTP \
     --speculative-num-steps 3 \
     --speculative-eagle-topk 1 \
@@ -58,7 +57,6 @@ ts serve \
     --enable-prefix-caching \
     --disable-kvstore \
     --block-size 128 \
-    --enable-cache-report \
     --speculative-algorithm MTP \
     --speculative-num-steps 3 \
     --speculative-eagle-topk 1 \
@@ -763,10 +761,14 @@ tokenspeed serve openai/gpt-oss-120b \
 
 ## DeepSeek V4-Flash / V4-Pro
 
-DeepSeek V4 needs FP8 KV cache, the DeepGEMM `mega_moe` experts, and the FP4
-indexer cache. `tokenspeed serve` auto-selects `--reasoning-parser deepseek_v31`
+DeepSeek V4 uses FP8 KV cache.
+`tokenspeed serve` auto-selects `--reasoning-parser deepseek_v31`
 and `--tool-call-parser deepseek_v4`, and auto-sets `block_size=256` (pass
-`--block-size N` with `N != 64` to override). Requires
+`--block-size N` with `N != 64` to override).
+
+### NVIDIA
+
+The NVIDIA recipes below require
 `tokenspeed-deepgemm>=2.5.0.post20260629` and `tokenspeed-flashmla`.
 
 **V4-Flash** — 4× B200 (SM100), data-parallel + expert-parallel:
@@ -812,6 +814,53 @@ tokenspeed serve deepseek-ai/DeepSeek-V4-Pro \
 For the expert-parallel topology, swap `--tensor-parallel-size 8` for
 `--tensor-parallel-size 8 --enable-expert-parallel --dense-tp-size 1` and
 `--moe-backend flashinfer_trtllm` for `--moe-backend mega_moe`.
+
+### AMD
+
+**V4-Flash** — 2× MI350-series (gfx950), tensor-parallel + MTP:
+
+```bash
+tokenspeed serve deepseek-ai/DeepSeek-V4-Flash \
+  --trust-remote-code \
+  --tensor-parallel-size 2 \
+  --kv-cache-dtype fp8_e4m3 \
+  --max-model-len 4096 \
+  --max-total-tokens 16384 \
+  --chunked-prefill-size 8192 \
+  --prefill-graph-max-tokens 8192 \
+  --gpu-memory-utilization 0.9 \
+  --disable-kvstore \
+  --speculative-algorithm MTP \
+  --speculative-num-steps 3 \
+  --host 127.0.0.1 \
+  --port 8000
+```
+
+**V4-Flash** — 1× MI450-series (gfx1250), Triton + decode/prefill graphs, without MTP:
+
+```bash
+tokenspeed serve deepseek-ai/DeepSeek-V4-Flash \
+  --served-model-name deepseek-v4-flash \
+  --trust-remote-code \
+  --tensor-parallel-size 1 \
+  --kv-cache-dtype fp8_e4m3 \
+  --moe-backend triton \
+  --attention-use-fp4-indexer-cache \
+  --max-model-len 4096 \
+  --max-total-tokens 8192 \
+  --max-num-seqs 4 \
+  --chunked-prefill-size 256 \
+  --gpu-memory-utilization 0.8 \
+  --disable-kvstore \
+  --max-cudagraph-capture-size 4 \
+  --cudagraph-capture-sizes 1 2 3 4 \
+  --prefill-graph-max-tokens 256 \
+  --prefill-graph-capture-sizes 128 256 \
+  --host 127.0.0.1 \
+  --port 8000
+```
+
+MTP is not yet validated on MI450.
 
 ### MTP speculative decoding
 
@@ -859,7 +908,6 @@ tokenspeed serve deepseek-ai/DeepSeek-V4-Flash \
   --max-cudagraph-capture-size 80 \
   --prefill-graph-max-tokens 2048 \
   --enable-metrics \
-  --enable-cache-report \
   --host 0.0.0.0 \
   --port 8000
 ```
@@ -870,6 +918,23 @@ DSpark weights are incomplete, the replay capability is missing, KVStore is
 enabled, or the draft checkpoint contains only MTP/NextN weights. External
 DSpark checkpoints that do not advertise this capability keep the generic
 scheduler behavior.
+
+Same-checkpoint DSpark materializes a stable FP32 view of the local target
+LM-head shard before cache sizing. Public FP32 Markov logits then reuse this
+buffer instead of converting the complete shard during every CUDA Graph
+replay. In-place target weight updates refresh the existing buffer outside the
+replay, preserving the address captured by CUDA Graph.
+
+The CUDA draft path also preserves the checkpoint's UE8M0-scaled FP8 activation
+round-trip with a fused `tokenspeed-kernel` operation. It computes the same
+per-group power-of-two scale and returns dequantized values in the input dtype;
+the fusion removes intermediate reduction and elementwise launches but does not
+change the model's quantization contract.
+
+DSpark attention RMSNorm uses the platform kernel on CUDA while retaining its
+explicit FP32-accumulating PyTorch expression as the CPU reference. The fused
+path preserves the existing output dtype and is safe to capture and replay in
+the target CUDA Graph.
 
 For a two-node TP8 deployment, run one process per node with four local workers
 and the same command on both nodes. See [Multi-Node](../serving/parallelism.md#multi-node)
