@@ -841,7 +841,7 @@ class K3MoeTailCommState:
                 ),
             )
         if fused_ok and self.multimem_ar_ok:
-            from tokenspeed_kernel.ops.communication.mnnvl_cutedsl_shared_rs import (
+            from tokenspeed_kernel.ops.communication.fused_rs_workspace import (
                 SharedRsWorkspace,
             )
 
@@ -883,7 +883,7 @@ class K3MoeTailCommState:
             if self.integrated_tail:
                 self.mnnvl_ht_deferred = self.fused_rs_up_ag_finalize
         if medium_ok and self.multimem_ar_ok:
-            from tokenspeed_kernel.ops.communication.mnnvl_cutedsl_shared_rs import (
+            from tokenspeed_kernel.ops.communication.fused_rs_workspace import (
                 SharedRsWorkspace,
             )
 
