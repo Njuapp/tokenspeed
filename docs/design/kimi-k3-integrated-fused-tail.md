@@ -23,7 +23,9 @@ use an unchanged main checkout, not a baseline mode inside this implementation.
 | 1025..8192 | Deferred HT finalize/AR/RMSNorm, ten stages | Fused RS/up/residual/AG |
 | Above 8192 | Existing separate path | Existing separate path |
 
-The selector uses continuous intervals on actual kernel M; a graph dispatches
+The shared `select_k3_moe_tail_tier` selector takes integrated capability as
+an explicit input and selects every tier before plan obligations are built.
+It uses continuous intervals on actual kernel M; a graph dispatches
 on its padded M using the existing graph ladder. Eager and graph forwards use
 the same selector and live-pointer launcher, including speculative forwards.
 No optimized-range fallback is permitted after integrated initialization.
@@ -96,7 +98,9 @@ All graph buckets use fixed parity addresses and execute sequentially; outputs
 are transient until the same slot is next written, not per-layer archives.
 Different concurrent model/graph instances require separate storage. Direct
 kernel tests may give the integrated adapter an independent output to test its
-live-pointer contract; there is no separate medium-only serving profile.
+live-pointer contract. The adapter requires an explicit `output` argument;
+only `output=None` requests a new allocation. There is no separate medium-only
+serving profile.
 
 ## Dataflow and arithmetic
 
@@ -160,6 +164,9 @@ references and graph replay, fused launch configuration, live input pointers,
 guarded outputs and changed-input replay. The integrated correctness harness
 supports `--pooled-outputs` for four layers sharing two physical outputs.
 Its intermediate snapshots are correctness instrumentation, not serving copies.
+Storage allocations accept positive capacities independently of the launch M
+range, so correctness tests can retain physical guard rows above M8192. The
+adapter and launch binders still enforce their supported token intervals.
 Distributed tests require TP8 and are not substitutes for model-quality checks.
 
 ## Source map and attribution

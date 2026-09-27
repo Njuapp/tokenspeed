@@ -53,14 +53,15 @@ class IntegratedFusedRsUpProjectionServing(FusedRsUpProjectionServingBase):
         workspace: SharedRsWorkspace,
         max_tokens: int,
         *,
-        output: SymmetricUpProjectionOutput | None = None,
+        output: SymmetricUpProjectionOutput | None,
     ):
         """Allocate one layer's output before KV sizing and graph capture.
 
         Args:
             workspace: Model-owned raw symmetric storage, used sequentially.
             max_tokens: Largest M this output must cover, in (32,8192].
-            output: Optional model-owned symmetric output. Its prior consumers
+            output: Model-owned symmetric output, or explicit None to allocate.
+                Its prior consumers
                 must finish before reuse; it must outlive every bound graph.
         """
         self.profile(max_tokens)

@@ -34,6 +34,7 @@ from tokenspeed.runtime.models.kimi_k3_comm import (
 def _select(**overrides):
     args = dict(
         num_tokens=1024,
+        integrated_tail=False,
         graph_phase=False,
         tail_fusion_max_tokens=32,
     )
@@ -72,7 +73,9 @@ def test_fallback_plan_reduces_and_projects_routed_in_fork(monkeypatch, integrat
 
     monkeypatch.setattr(kimi_k3_comm, "get_is_cuda_graph_phase", lambda: False)
     comm = object.__new__(K3MoeTailComm)
-    comm.state = SimpleNamespace(integrated_tail=integrated)
+    comm.state = SimpleNamespace(
+        integrated_tail=integrated, mnnvl_bt_deferred=None, mnnvl_ht_deferred=None
+    )
     comm.latent_tail = None
 
     plan = comm.plan(m)

@@ -65,6 +65,7 @@ class TritonCommState:
     world_size: int
     device: torch.device
     attnres_max_numel: int
+    enable_lamport: bool
     max_numel: int
     max_bytes: int
     max_token_num: int
@@ -1043,6 +1044,7 @@ def nvidia_create_rsag_state(
     )
     symm_mem.rendezvous(comm_buff, group=group)
     return TritonCommState(
+        enable_lamport=False,
         group=group,
         rank_in_group=rank_in_group,
         world_size=group.size(),
@@ -1513,6 +1515,7 @@ def amd_create_rsag_state(
     )
     assert rank_in_group == symm_mem_hdl.rank, "Mismatched rank id"
     return TritonCommState(
+        enable_lamport=False,
         group=group,
         rank_in_group=rank_in_group,
         world_size=world_size,
@@ -1727,6 +1730,7 @@ def create_allreduce_residual_rmsnorm_state(
         assert platform.is_nvidia, f"Unsupported platform: {platform}"
 
     return TritonCommState(
+        enable_lamport=False,
         group=group,
         rank_in_group=rank_in_group,
         world_size=world_size,
@@ -1907,6 +1911,7 @@ def create_state(
     max_bytes: int,
     attnres_max_numel: int,
     attnres_max_rows: int,
+    enable_lamport: bool,
 ) -> TritonCommState:
     """Create an all-reduce or reduce-scatter/all-gather communication state.
 
@@ -1922,6 +1927,8 @@ def create_state(
             pass zero when the state does not use AttnRes.
         attnres_max_rows: Maximum fused attention/AttnRes payload in rows; pass
             zero when the state does not use AttnRes.
+        enable_lamport: Allow Lamport for eligible producer-direct payloads;
+            pass false for RS/AG states.
 
     Returns:
         The initialized communication state.
@@ -1953,6 +1960,7 @@ def create_state(
             max_numel=max_numel,
             max_bytes=max_bytes,
             attnres_max_numel=attnres_max_numel,
+            enable_lamport=enable_lamport,
             max_token_num=attnres_max_rows,
             hidden_dim=0,
             comm_buff=comm_buff,
@@ -2006,6 +2014,7 @@ def _iris_state_key(state: TritonCommState, dtype: torch.dtype) -> tuple:
         producer_direct_max_numel,
         state.attnres_max_numel,
         state.max_token_num,
+        state.enable_lamport,
         dtype,
     )
 
@@ -2020,6 +2029,9 @@ def _iris_state_is_compatible(iris_state, state, dtype: torch.dtype) -> bool:
         and iris_state.producer_direct_max_numel >= state.max_bytes // dtype.itemsize
         and iris_state.attnres_max_numel >= state.attnres_max_numel
         and iris_state.attnres_max_rows >= state.max_token_num
+        # AttnRes-only views can share a prepared state regardless of its
+        # producer-direct policy; they never dispatch a Lamport reduction.
+        and (state.max_bytes == 0 or iris_state.enable_lamport == state.enable_lamport)
     )
 
 
@@ -2046,6 +2058,7 @@ def _get_or_create_iris_state(state: TritonCommState, dtype: torch.dtype):
             producer_direct_max_numel=state.max_bytes // dtype.itemsize,
             attnres_max_numel=state.attnres_max_numel,
             attnres_max_rows=state.max_token_num,
+            enable_lamport=state.enable_lamport,
             dtype=dtype,
             heap_size=None,
             device=state.device,
@@ -2302,6 +2315,7 @@ def _attnres_comm_state(
     group: dist.ProcessGroup,
 ) -> TritonCommState:
     return TritonCommState(
+        enable_lamport=False,
         group=group,
         rank_in_group=rank,
         world_size=group.size(),

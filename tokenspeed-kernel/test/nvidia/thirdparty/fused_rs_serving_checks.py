@@ -40,7 +40,7 @@ from tokenspeed_kernel.ops.communication.mnnvl_cutedsl_symmetric_up_projection i
 from tokenspeed_kernel.ops.gemm.kimi3 import kimi3_shared_down_projection
 
 
-def make_operands(m, slot, device, layers=2):
+def make_operands(m, slot, device, layers):
     replicated = torch.Generator(device=device).manual_seed(9231 + m + 101 * slot)
     local = torch.Generator(device=device).manual_seed(
         18001 + m + 103 * slot + 997 * dist.get_rank()
@@ -65,7 +65,7 @@ def make_operands(m, slot, device, layers=2):
     return {"latent": latent, "residual": residual, "producers": producers}
 
 
-def run_layers(operands, adapters, weights, snapshot_outputs=False):
+def run_layers(operands, adapters, weights, snapshot_outputs):
     prefix, results = operands["residual"], []
     m = prefix.shape[0]
     for layer, adapter in enumerate(adapters):
@@ -122,9 +122,7 @@ def update_inputs(operands, saved, phase):
             producer[0].neg_()
 
 
-def make_case(
-    m, slot, adapters, weights, warmup, stream, device, snapshot_outputs=False
-):
+def make_case(m, slot, adapters, weights, warmup, stream, device, snapshot_outputs):
     operands = make_operands(m, slot, device, len(adapters))
     warm_latent = {tensor.data_ptr() for tensor in warmup["latent"]}
     warm_residual = {warmup["residual"].data_ptr()}
@@ -180,7 +178,9 @@ def make_case(
 
 
 def rejection_checks(workspace, adapters, weights, operands, m, stream):
-    fresh = type(adapters[0])(workspace, adapters[0].output.tensor.shape[0])
+    fresh = type(adapters[0])(
+        workspace, adapters[0].output.tensor.shape[0], output=None
+    )
     rejected_capture = False
     graph = torch.cuda.CUDAGraph()
     try:
@@ -224,7 +224,7 @@ def guard_checks(workspace, guards, capacity):
     )
 
 
-def run(args, device, adapter_type, profile, output_pool_type=None):
+def run(args, device, adapter_type, profile, output_pool_type):
     capacity = max(args.tokens)
     workspace = SharedRsWorkspace.allocate(dist.group.WORLD, capacity + 32, device)
     workspace.state.comm_buff[capacity:].fill_(53.0)
@@ -234,7 +234,7 @@ def run(args, device, adapter_type, profile, output_pool_type=None):
     adapters = (
         [pool.bind_layer(i) for i in range(layers)]
         if pooled
-        else [adapter_type(workspace, capacity) for _ in range(layers)]
+        else [adapter_type(workspace, capacity, output=None) for _ in range(layers)]
     )
     owners, guards = [], []
     # Add a physical guard after the logical output without modifying adapter

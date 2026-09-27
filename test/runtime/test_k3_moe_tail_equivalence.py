@@ -150,6 +150,8 @@ def _build_comm(device: torch.device, *, latent_tail=None):
     # Negotiated state stand-in.
     comm.state = SimpleNamespace(
         rms_eps=EPS,
+        mnnvl_bt_deferred=None,
+        mnnvl_ht_deferred=None,
         integrated_tail=False,
         latent_tail_ok=latent_tail is not None,
     )
@@ -333,6 +335,7 @@ def test_selector_boundaries():
             num_tokens=num_tokens,
             graph_phase=graph_phase,
             tail_fusion_max_tokens=fused_max,
+            integrated_tail=False,
         )
 
     assert pick(1, graph_phase=True, fused_max=32) is K3MoETailTier.TAIL_FUSION
@@ -363,7 +366,9 @@ def test_profit_cap_stops_the_fused_tail_below_its_capacity(monkeypatch):
         split_collective_min_tokens=9,
     )
     comm.execution_plan = SimpleNamespace(fused_moe_ar=True)
-    comm.state = SimpleNamespace(integrated_tail=False)
+    comm.state = SimpleNamespace(
+        integrated_tail=False, mnnvl_bt_deferred=None, mnnvl_ht_deferred=None
+    )
     comm._shard_up_projection = False
     # __init__ is bypassed here; the probe declines on CPU, so no symmetric
     # heap is reached.
@@ -398,7 +403,9 @@ def test_tail_fusion_plan_defer_decision(monkeypatch):
             split_collective_min_tokens=9,
         )
         comm.execution_plan = SimpleNamespace(fused_moe_ar=fused_ar)
-        comm.state = SimpleNamespace(integrated_tail=False)
+        comm.state = SimpleNamespace(
+            integrated_tail=False, mnnvl_bt_deferred=None, mnnvl_ht_deferred=None
+        )
         comm._shard_up_projection = False
         # __init__ is bypassed here; the probe declines on CPU, so no
         # symmetric heap is reached.
@@ -457,7 +464,11 @@ def test_fused_tail_matches_reference(m):
     rank, dev = _setup()
     if not _agreed(
         latent_tail_supported(
-            tp_size=_world_size(), hidden_size=H, latent_size=L, dtype=torch.bfloat16
+            tp_size=_world_size(),
+            hidden_size=H,
+            latent_size=L,
+            dtype=torch.bfloat16,
+            group=dist.group.WORLD,
         )
     ):
         pytest.skip("fused latent tail unsupported here")
@@ -499,7 +510,11 @@ def test_fused_tail_deferred_finalize_matches_reference(m):
     rank, dev = _setup()
     if not _agreed(
         latent_tail_supported(
-            tp_size=_world_size(), hidden_size=H, latent_size=L, dtype=torch.bfloat16
+            tp_size=_world_size(),
+            hidden_size=H,
+            latent_size=L,
+            dtype=torch.bfloat16,
+            group=dist.group.WORLD,
         )
     ):
         pytest.skip("fused latent tail unsupported here")
@@ -582,7 +597,11 @@ def test_tiers_agree_with_each_other():
     tail = None
     if _agreed(
         latent_tail_supported(
-            tp_size=_world_size(), hidden_size=H, latent_size=L, dtype=torch.bfloat16
+            tp_size=_world_size(),
+            hidden_size=H,
+            latent_size=L,
+            dtype=torch.bfloat16,
+            group=dist.group.WORLD,
         )
     ):
         tail = KimiK3LatentTailOp.initialize(

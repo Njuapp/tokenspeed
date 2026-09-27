@@ -63,15 +63,16 @@ class SharedRsWorkspace:
 
         Args:
             group: Eight-rank NVLS-capable process group.
-            max_tokens: Capacity in [1,8192], identical on every rank.
+            max_tokens: Positive storage capacity, identical on every rank.
+                May include guard rows beyond the supported dispatch range.
             device: This rank's CUDA device.
 
         Returns:
             Independently owned workspace; never shared by concurrent graphs.
         """
         error = None
-        if dist.get_world_size(group) != 8 or max_tokens < 1 or max_tokens > 8192:
-            error = "requires TP8 and capacity in [1,8192]"
+        if dist.get_world_size(group) != 8 or max_tokens < 1:
+            error = "requires TP8 and positive storage capacity"
         if device.type != "cuda" or torch.cuda.is_current_stream_capturing():
             error = "allocation requires CUDA outside graph capture"
         _vote(group, max_tokens, error)

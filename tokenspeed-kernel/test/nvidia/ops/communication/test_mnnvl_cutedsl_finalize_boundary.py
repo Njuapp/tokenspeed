@@ -31,7 +31,7 @@ from tokenspeed_kernel.platform import ArchVersion
 from tokenspeed_kernel.registry import KernelRegistry
 from tokenspeed_kernel.thirdparty.flashinfer import mnnvl_cutedsl_finalize as adapter
 
-_KERNEL_ROOT = Path(__file__).resolve().parents[3]
+_KERNEL_ROOT = Path(__file__).resolve().parents[4]
 _OPS_SOURCE = (
     _KERNEL_ROOT
     / "python/tokenspeed_kernel/ops/communication/mnnvl_cutedsl_finalize.py"

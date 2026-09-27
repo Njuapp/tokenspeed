@@ -88,7 +88,7 @@ from tokenspeed.runtime.utils.env import global_server_args_dict
 logger = logging.getLogger(__name__)
 
 _IRIS_MAX_TOKENS = 8192
-_IRIS_PRODUCER_DIRECT_MAX_BYTES = 1024 * 1024
+_IRIS_BASELINE_PRODUCER_DIRECT_MAX_TOKENS = 48
 
 # Widest reduce this instance is built for; it becomes the collective's max_m.
 ATTN_AR_MAX_TOKENS = 8
@@ -179,46 +179,34 @@ def _integrated_tail_applicable(
     )
 
 
-def select_integrated_k3_moe_tail_tier(num_tokens: int) -> K3MoETailTier | None:
-    """Return the integrated interval tier; None preserves the old small path.
-
-    Args:
-        num_tokens: Actual forward M, or graph-padded M, not request count.
-
-    Returns:
-        BT/fused for (32,1024], HT/fused for (1024,8192], separate above
-        8192, and None for empty/small forwards. No sampled-point whitelist.
-    """
-    if type(num_tokens) is not int or num_tokens < 0:
-        raise ValueError("token count must be a nonnegative integer")
-    if num_tokens <= 32:
-        return None
-    if num_tokens <= 1024:
-        return K3MoETailTier.MEDIUM_FUSED_RS_UP_AG
-    if num_tokens <= 8192:
-        return K3MoETailTier.FUSED_RS_UP_AG
-    return K3MoETailTier.SEPARATE_REDUCE
-
-
 def select_k3_moe_tail_tier(
     *,
     num_tokens: int,
     graph_phase: bool,
     tail_fusion_max_tokens: int,
+    integrated_tail: bool,
 ) -> K3MoETailTier:
-    """Select the small graph tail or the portable separate-reduce path.
+    """Select a tail from rank-uniform capacity and backend capabilities.
 
     Args:
-        num_tokens: Rank-uniform token count for this forward.
+        num_tokens: Actual forward M, or graph-padded M, not request count.
         graph_phase: Whether the forward runs under the CUDA-graph phase.
-        tail_fusion_max_tokens: Available small-tail capacity, already capped
-            at the profitable token range; zero when unavailable.
+        tail_fusion_max_tokens: Available small-tail capacity, capped by caller.
+        integrated_tail: Whether the integrated TP8 resources were negotiated.
 
     Returns:
-        TAIL_FUSION for a supported small graph forward, otherwise
-        SEPARATE_REDUCE. The integrated medium/large route is selected first
-        by K3MoeTailComm.plan.
+        The shared eager/graph/speculative tier. Integrated M33..1024 uses BT,
+        M1025..8192 uses HT, and larger forwards use separate reduction.
+        Small forwards use fusion only in graph phase with available capacity.
     """
+    if type(num_tokens) is not int or num_tokens < 0:
+        raise ValueError("token count must be a nonnegative integer")
+    if integrated_tail and num_tokens > 32:
+        if num_tokens <= 1024:
+            return K3MoETailTier.MEDIUM_FUSED_RS_UP_AG
+        if num_tokens <= 8192:
+            return K3MoETailTier.FUSED_RS_UP_AG
+        return K3MoETailTier.SEPARATE_REDUCE
     if graph_phase and 1 <= num_tokens <= tail_fusion_max_tokens:
         return K3MoETailTier.TAIL_FUSION
     return K3MoETailTier.SEPARATE_REDUCE
@@ -248,12 +236,23 @@ def prepare_k3_all_reduce_buffers(
         allreduce_residual_attnres_max_tokens(mapping.attn.tp_size),
     )
     groups_are_equal = mapping.attn.tp_group == mapping.moe.tp_ep_group
-    # Iris and RCCL sum in different orders. Using Iris for K3 prefill changed
-    # the greedy EAGLE3 trajectory enough to reduce acceptance and end-to-end
-    # output throughput, despite making this collective faster in isolation.
-    producer_direct_max_numel = min(
-        max_num_tokens * (hidden_size + routed_hidden_size),
-        _IRIS_PRODUCER_DIRECT_MAX_BYTES // torch.bfloat16.itemsize,
+    # The Lamport crossover was measured with attention TP8 and MoE TP8.
+    enable_lamport = (
+        groups_are_equal
+        and mapping.attn.tp_size == 8
+        and mapping.moe.tp_size == 8
+        and mapping.moe.ep_size == 1
+    )
+    # Keep the full producer-direct window for equal TP8 groups. Its 50K/500
+    # C16 gain survives content-sensitive EAGLE3 trajectories; retain 48 tokens
+    # for other mappings.
+    expand_moe_window = (
+        groups_are_equal and mapping.attn.tp_size == 8 and mapping.moe.tp_ep_size == 8
+    )
+    producer_direct_max_tokens = (
+        max_num_tokens
+        if expand_moe_window
+        else min(max_num_tokens, _IRIS_BASELINE_PRODUCER_DIRECT_MAX_TOKENS)
     )
     prepared = False
     if mapping.attn.tp_size > 1:
@@ -261,12 +260,13 @@ def prepare_k3_all_reduce_buffers(
             mapping.attn.tp_group,
             staged_max_numel=max_num_tokens * hidden_size,
             producer_direct_max_numel=(
-                producer_direct_max_numel
+                producer_direct_max_tokens * (hidden_size + routed_hidden_size)
                 if groups_are_equal and mapping.moe.tp_ep_size > 1
                 else 0
             ),
             attnres_max_numel=attnres_max_rows * hidden_size,
             attnres_max_rows=attnres_max_rows,
+            enable_lamport=enable_lamport,
             dtype=torch.bfloat16,
             backend=None,
         )
@@ -275,9 +275,11 @@ def prepare_k3_all_reduce_buffers(
             prepare_all_reduce_buffers(
                 mapping.moe.tp_ep_group,
                 staged_max_numel=max_num_tokens * hidden_size,
-                producer_direct_max_numel=producer_direct_max_numel,
+                producer_direct_max_numel=producer_direct_max_tokens
+                * (hidden_size + routed_hidden_size),
                 attnres_max_numel=0,
                 attnres_max_rows=0,
+                enable_lamport=False,
                 dtype=torch.bfloat16,
                 backend=None,
             )
@@ -385,14 +387,12 @@ class K3AttnCommState:
                     hidden_size=hidden,
                     max_tokens=ATTN_AR_MAX_TOKENS,
                 )
-        logger.info(
-            "Kimi K3 attention reduce: %s",
-            (
-                "tokenspeed CuteDSL collective at M<=%d" % ATTN_AR_MAX_TOKENS
-                if self.cute_ar is not None
-                else "not armed; the existing backends serve every M"
-            ),
+        attention_reduce_backend = (
+            f"tokenspeed CuteDSL collective at M<={ATTN_AR_MAX_TOKENS}"
+            if self.cute_ar is not None
+            else "not armed; the existing backends serve every M"
         )
+        logger.info(f"Kimi K3 attention reduce: {attention_reduce_backend}")
 
 
 class K3MoeTailCommState:
@@ -655,13 +655,11 @@ class K3MoeTailCommState:
             self.fused_rs_up_ag_capacity = fused_capacity
         self.latent_tail_ok = tail_ok
         logger.info(
-            "K3 comm negotiated: integrated_comm=%s mnnvl_bt_deferred=%s "
-            "mnnvl_ht_deferred=%s fused_rs_up_ag_capacity=%d latent_tail=%s",
-            integrated_comm_ok,
-            self.mnnvl_bt_deferred is not None,
-            self.mnnvl_ht_deferred is not None,
-            self.fused_rs_up_ag_capacity,
-            self.latent_tail_ok,
+            f"K3 comm negotiated: integrated_comm={integrated_comm_ok} "
+            f"mnnvl_bt_deferred={self.mnnvl_bt_deferred is not None} "
+            f"mnnvl_ht_deferred={self.mnnvl_ht_deferred is not None} "
+            f"fused_rs_up_ag_capacity={self.fused_rs_up_ag_capacity} "
+            f"latent_tail={self.latent_tail_ok}"
         )
 
 
@@ -679,6 +677,34 @@ class K3AttnComm:
     # ------------------------------------------------------------------
     # Attention-side reduction, hoisted from KimiLinearDecoderLayer.
     # ------------------------------------------------------------------
+    def fused_attnres_reduce_available(
+        self,
+        partial: torch.Tensor,
+        residual: torch.Tensor,
+        combine: tuple,
+        score_weight: torch.Tensor | None,
+    ) -> bool:
+        """Whether the communication path can consume the AttnRes epilogue."""
+        scratch, _, _, output_weight, _ = combine
+        if score_weight is None or output_weight is None:
+            return False
+        from tokenspeed_kernel.ops.communication.triton import (
+            allreduce_residual_attnres_combine_supported,
+        )
+
+        return not global_server_args_dict.get(
+            "force_deterministic_rsag", False
+        ) and allreduce_residual_attnres_combine_supported(
+            partial,
+            residual,
+            score_weight,
+            output_weight,
+            scratch,
+            rank=self.mapping.attn.tp_rank,
+            group=_get_process_group(self.mapping.attn.tp_group),
+            local_world_size=self.mapping.nprocs_per_node,
+        )
+
     def attn_reduce(
         self,
         attn_partial: torch.Tensor,
@@ -766,16 +792,18 @@ class K3AttnComm:
                 return residual_out, None
         if combine is not None and prefix_sum is not None and num_tokens > 0:
             scratch, _, _, out_norm_w, eps = combine
-            if out_norm_w is not None:
+            if out_norm_w is not None and self.fused_attnres_reduce_available(
+                attn_partial,
+                prefix_sum,
+                combine,
+                mlp_wp,
+            ):
                 from tokenspeed_kernel.ops.communication.triton import (
                     allreduce_residual_attnres_combine,
-                    allreduce_residual_attnres_combine_supported,
                 )
 
                 group = _get_process_group(self.mapping.attn.tp_group)
-                fused_supported = not global_server_args_dict.get(
-                    "force_deterministic_rsag", False
-                ) and allreduce_residual_attnres_combine_supported(
+                h, residual_out = allreduce_residual_attnres_combine(
                     attn_partial,
                     prefix_sum,
                     mlp_wp,
@@ -784,20 +812,9 @@ class K3AttnComm:
                     rank=self.mapping.attn.tp_rank,
                     group=group,
                     local_world_size=self.mapping.nprocs_per_node,
+                    eps=eps,
                 )
-                if fused_supported:
-                    h, residual_out = allreduce_residual_attnres_combine(
-                        attn_partial,
-                        prefix_sum,
-                        mlp_wp,
-                        out_norm_w,
-                        scratch,
-                        rank=self.mapping.attn.tp_rank,
-                        group=group,
-                        local_world_size=self.mapping.nprocs_per_node,
-                        eps=eps,
-                    )
-                    return residual_out, h
+                return residual_out, h
         reduced = all_reduce(attn_partial, self.mapping.attn.tp_group)
         return (reduced if prefix_sum is None else prefix_sum + reduced), None
 
@@ -878,7 +895,7 @@ class K3MoeTailComm:
             hidden_size=hidden_size,
             latent_size=routed_hidden,
             top_k=top_k,
-            rms_eps=(routed_norm.variance_epsilon if routed_norm is not None else 1e-5),
+            rms_eps=(routed_norm.variance_epsilon if routed_norm is not None else 1e-6),
             allow_latent_tail=(
                 not execution_plan.use_native and routed_norm is not None
             ),
@@ -901,9 +918,6 @@ class K3MoeTailComm:
         self.routed_norm = routed_norm
         self.up_proj = up_proj
         self.execution_plan = execution_plan
-        # Derived from the projection itself (built with a shard group iff
-        # _shard_k3_latent_projection held), so comm and module cannot disagree.
-        self._shard_up_projection = up_proj.shard_group is not None
         self.latent_tail = None
         self.fused_rs_up_ag = None
         if self.state.fused_rs_up_ag_workspace is not None:
@@ -957,10 +971,8 @@ class K3MoeTailComm:
             )
             logger.info(
                 "multicast latent tail engaged "
-                "(%s, deferred_finalize=%s, split_shared_rs=%s)",
-                prefix,
-                tail_finalize_top_k is not None,
-                self.latent_tail.supports_split_collective,
+                f"({prefix!s}, deferred_finalize={tail_finalize_top_k is not None!s}, "
+                f"split_shared_rs={self.latent_tail.supports_split_collective!s})",
             )
 
     # ------------------------------------------------------------------
@@ -975,33 +987,11 @@ class K3MoeTailComm:
         Every input must be rank-uniform (token count, graph phase and the
         negotiated capabilities) so all ranks take identical branches.
         """
-        bt_workspace = getattr(self.state, "mnnvl_bt_deferred", None)
-        ht_workspace = getattr(self.state, "mnnvl_ht_deferred", None)
-        if getattr(self.state, "integrated_tail", False):
-            integrated_tier = select_integrated_k3_moe_tail_tier(num_tokens)
-            if integrated_tier is K3MoETailTier.SEPARATE_REDUCE:
-                return TailPlan(tier=integrated_tier, routed_in_fork=True)
-            if integrated_tier is not None:
-                finalize = bt_workspace if num_tokens <= 1024 else ht_workspace
-                if (
-                    self.fused_rs_up_ag is None
-                    or finalize is None
-                    or not finalize.supports_num_tokens(num_tokens)
-                    or not self._experts_supports_deferred_finalize
-                ):
-                    raise RuntimeError(
-                        f"integrated K3 tail missing M={num_tokens} route"
-                    )
-                return TailPlan(
-                    tier=integrated_tier,
-                    defer_finalize=True,
-                    symm_outputs=(None, self.fused_rs_up_ag.input_view(num_tokens)),
-                )
-        # Only small M or unsupported model/backend layouts reach compatibility dispatch.
-        # Supported M33..8192 returned above; a missing fused route raises.
-        # Graph warmup, capture, and replay must select the same tier.
+        bt_workspace = self.state.mnnvl_bt_deferred
+        ht_workspace = self.state.mnnvl_ht_deferred
         tier = select_k3_moe_tail_tier(
             num_tokens=num_tokens,
+            integrated_tail=self.state.integrated_tail,
             graph_phase=get_is_cuda_graph_phase(),
             tail_fusion_max_tokens=(
                 min(self.latent_tail.max_num_tokens, TAIL_FUSION_MAX_TOKENS)
@@ -1009,6 +999,27 @@ class K3MoeTailComm:
                 else 0
             ),
         )
+        if tier in (
+            K3MoETailTier.MEDIUM_FUSED_RS_UP_AG,
+            K3MoETailTier.FUSED_RS_UP_AG,
+        ):
+            finalize = (
+                bt_workspace
+                if tier is K3MoETailTier.MEDIUM_FUSED_RS_UP_AG
+                else ht_workspace
+            )
+            if (
+                self.fused_rs_up_ag is None
+                or finalize is None
+                or not finalize.supports_num_tokens(num_tokens)
+                or not self._experts_supports_deferred_finalize
+            ):
+                raise RuntimeError(f"integrated K3 tail missing M={num_tokens} route")
+            return TailPlan(
+                tier=tier,
+                defer_finalize=True,
+                symm_outputs=(None, self.fused_rs_up_ag.input_view(num_tokens)),
+            )
         if tier is K3MoETailTier.TAIL_FUSION:
             # Full fusion: with the trtllm fused-AR plan armed and a
             # deferred-capable tail op, the multicast tail consumes the

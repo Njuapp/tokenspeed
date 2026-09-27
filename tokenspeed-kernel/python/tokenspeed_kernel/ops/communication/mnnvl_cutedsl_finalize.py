@@ -364,7 +364,6 @@ def _require_collective_agreement(
         "capturing": frozenset({True}),
     },
     priority=Priority.SPECIALIZED,
-    tags={"blackwell", "cuda_graph", "determinism", "throughput"},
 )
 def mnnvl_cutedsl_deferred_finalize_allreduce_rmsnorm(
     backend: MNNVLCuteDSLDeferredFinalizeBackend,

@@ -143,17 +143,18 @@ def _make_weights(
 ):
     """Random weights in the prepared TRTLLM layout (perf-representative).
 
-    Scale bytes are pinned to 127 (2^0) so garbage exponents cannot produce
+    Scale bytes encode one in E8M0 (MXFP) or E4M3 (NVFP4), avoiding
     inf/nan; tactic ranking depends on shapes and routing, not weight values.
     """
     scale_block = _scale_block_size(quant_format)
+    scale_byte = 127 if quant_format == "mxfp" else 0x38
     g = torch.Generator(device="cpu").manual_seed(seed)
     w13 = torch.randint(
         0, 256, (local_experts, 2 * ispp, hidden // 2), generator=g, dtype=torch.uint8
     ).to(device)
     w13_scale = torch.full(
         (local_experts, 2 * ispp, hidden // scale_block),
-        127,
+        scale_byte,
         dtype=torch.uint8,
         device=device,
     ).view(torch.float8_e4m3fn)
@@ -162,7 +163,7 @@ def _make_weights(
     ).to(device)
     w2_scale = torch.full(
         (local_experts, hidden, ispp // scale_block),
-        127,
+        scale_byte,
         dtype=torch.uint8,
         device=device,
     ).view(torch.float8_e4m3fn)

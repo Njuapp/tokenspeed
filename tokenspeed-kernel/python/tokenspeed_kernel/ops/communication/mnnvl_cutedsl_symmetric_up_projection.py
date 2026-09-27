@@ -218,7 +218,8 @@ def allocate_symmetric_up_projection_output(
 
     Args:
         group: Rank-consistent eight-GPU process group with NVLS multicast.
-        num_tokens: Equal on every rank, in [256,8192].
+        num_tokens: Positive storage capacity, equal on every rank. May
+            include guard rows; launchers validate their supported M separately.
         device: Local CUDA device, defaulting to the current device.
 
     Returns:
@@ -229,8 +230,8 @@ def allocate_symmetric_up_projection_output(
     try:
         if torch.cuda.is_current_stream_capturing():
             raise ValueError("symmetric output allocation is forbidden during capture")
-        if dist.get_world_size(group) != TP or not 256 <= num_tokens <= 8192:
-            raise ValueError("requires TP8 and 256 <= M <= 8192")
+        if dist.get_world_size(group) != TP or num_tokens < 1:
+            raise ValueError("requires TP8 and positive storage capacity")
         if torch.cuda.get_device_capability(device)[0] != 10:
             raise ValueError("requires Blackwell SM100/SM103")
     except Exception as exc:
@@ -292,6 +293,8 @@ class BoundSymmetricUpProjection:
         m = output.tensor.shape[0]
         error = None
         try:
+            if not 256 <= m <= 8192:
+                raise ValueError("standalone up projection requires 256 <= M <= 8192")
             tuning.validate()
             if torch.cuda.is_current_stream_capturing():
                 raise ValueError("prepare must run before capture")
@@ -492,7 +495,6 @@ class BoundSymmetricUpProjection:
         max_arch_version=ArchVersion(10, 3),
     ),
     priority=Priority.SPECIALIZED,
-    tags={"blackwell", "throughput", "experimental"},
 )
 def symmetric_up_projection(plan: BoundSymmetricUpProjection) -> torch.Tensor:
     """Run a prepared plan and return its explicitly owned symmetric output."""

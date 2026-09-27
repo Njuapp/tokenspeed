@@ -403,7 +403,7 @@ def runtime_policy():
     names = {
         "K3MoETailTier",
         "_integrated_tail_applicable",
-        "select_integrated_k3_moe_tail_tier",
+        "select_k3_moe_tail_tier",
     }
     nodes = [node for node in tree.body if getattr(node, "name", None) in names]
     comm = next(
@@ -417,14 +417,12 @@ def runtime_policy():
         if isinstance(node, ast.FunctionDef) and node.name in {"plan", "run"}
     ]
 
-    def reject_legacy_dispatch(**kwargs):
-        raise AssertionError("supported fused M reached legacy dispatch")
-
     namespace = {
         "IntEnum": IntEnum,
         "torch": SimpleNamespace(Tensor=object),
         "TailPlan": SimpleNamespace,
-        "select_k3_moe_tail_tier": reject_legacy_dispatch,
+        "get_is_cuda_graph_phase": lambda: False,
+        "TAIL_FUSION_MAX_TOKENS": 32,
     }
     exec(
         compile(
@@ -497,7 +495,7 @@ def test_automatic_route_requires_supported_model_backend(runtime_policy, key, v
         (16384, "SEPARATE_REDUCE"),
     ],
 )
-def test_automatic_plan_bypasses_legacy_tail(runtime_policy, m, tier):
+def test_automatic_plan_uses_shared_selector(runtime_policy, m, tier):
     from types import SimpleNamespace
 
     namespace, _ = runtime_policy
@@ -509,6 +507,7 @@ def test_automatic_plan_bypasses_legacy_tail(runtime_policy, m, tier):
             mnnvl_bt_deferred=finalize,
             mnnvl_ht_deferred=finalize,
         ),
+        latent_tail=None,
         fused_rs_up_ag=SimpleNamespace(input_view=lambda tokens: raw),
         _experts_supports_deferred_finalize=True,
     )
@@ -610,3 +609,187 @@ def test_integrated_run_keeps_bt_ht_and_one_fused_back_half(
         (protocol, (*deferred, norm_weight)),
         ("fused", (normalized, weight, residual, shared)),
     ]
+
+
+@pytest.mark.parametrize("graph_phase", [False, True])
+@pytest.mark.parametrize("integrated", [False, True])
+@pytest.mark.parametrize("m", [0, 1, 32, 33, 64, 1024, 1025, 8192, 8193])
+def test_shared_selector_boundaries(runtime_policy, graph_phase, integrated, m):
+    namespace, _ = runtime_policy
+    tiers = namespace["K3MoETailTier"]
+    expected = tiers.SEPARATE_REDUCE
+    if graph_phase and 1 <= m <= 32:
+        expected = tiers.TAIL_FUSION
+    if integrated and 33 <= m <= 1024:
+        expected = tiers.MEDIUM_FUSED_RS_UP_AG
+    if integrated and 1025 <= m <= 8192:
+        expected = tiers.FUSED_RS_UP_AG
+    assert (
+        namespace["select_k3_moe_tail_tier"](
+            num_tokens=m,
+            graph_phase=graph_phase,
+            tail_fusion_max_tokens=32,
+            integrated_tail=integrated,
+        )
+        is expected
+    )
+
+
+def test_serving_output_choice_is_required():
+    from types import SimpleNamespace
+
+    path = OPS / "medium_fused_rs_up_projection_serving.py"
+    tree = ast.parse(path.read_text())
+    adapter = next(
+        n
+        for n in tree.body
+        if isinstance(n, ast.ClassDef)
+        and n.name == "IntegratedFusedRsUpProjectionServing"
+    )
+    init = next(
+        n
+        for n in adapter.body
+        if isinstance(n, ast.FunctionDef) and n.name == "__init__"
+    )
+    namespace = {"SymmetricUpProjectionOutput": object, "SharedRsWorkspace": object}
+    exec(
+        compile(ast.Module(body=[init], type_ignores=[]), str(path), "exec"), namespace
+    )
+    with pytest.raises(TypeError, match="output"):
+        namespace["__init__"](SimpleNamespace(), object(), 8192)
+
+
+@pytest.mark.parametrize("capacity", [33, 128, 8192, 8224])
+def test_storage_capacity_is_independent_of_dispatch_range(capacity):
+    from types import SimpleNamespace
+
+    group = object()
+    allocations = []
+
+    def vote(actual_group, identity, error):
+        assert actual_group is group
+        assert identity == capacity
+        assert error is None
+
+    fake_torch = SimpleNamespace(
+        cuda=SimpleNamespace(
+            is_current_stream_capturing=lambda: False,
+            get_device_capability=lambda device: (10, 3),
+        ),
+        bfloat16=object(),
+    )
+    fake_dist = SimpleNamespace(
+        get_world_size=lambda actual_group: 8, get_rank=lambda actual_group: 0
+    )
+    handle = SimpleNamespace(multicast_ptr=16, rank=0, world_size=8)
+
+    def allocate(shape, dtype, device, actual_group):
+        allocations.append(shape)
+        return object(), handle
+
+    path = OPS / "mnnvl_cutedsl_symmetric_up_projection.py"
+    tree = ast.parse(path.read_text())
+    node = next(
+        n
+        for n in tree.body
+        if isinstance(n, ast.FunctionDef)
+        and n.name == "allocate_symmetric_up_projection_output"
+    )
+    # Postpone annotations without importing GPU dependencies.
+    namespace = {
+        "torch": fake_torch,
+        "dist": fake_dist,
+        "TP": 8,
+        "HIDDEN": 7168,
+        "_vote": vote,
+        "_alloc_symm": allocate,
+        "SymmetricUpProjectionOutput": lambda *args: args,
+    }
+    import __future__
+
+    exec(
+        compile(
+            ast.Module(body=[node], type_ignores=[]),
+            str(path),
+            "exec",
+            flags=__future__.annotations.compiler_flag,
+        ),
+        namespace,
+    )
+    namespace[node.name](group, capacity, device=object())
+    assert allocations == [(capacity, 7168)]
+
+    path = OPS / "fused_rs_workspace.py"
+    tree = ast.parse(path.read_text())
+    cls = next(
+        n
+        for n in tree.body
+        if isinstance(n, ast.ClassDef) and n.name == "SharedRsWorkspace"
+    )
+    node = next(
+        n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "allocate"
+    )
+    node.decorator_list = []
+    state = object()
+    namespace["_create_shared_input_state"] = lambda *args: state
+    exec(
+        compile(
+            ast.Module(body=[node], type_ignores=[]),
+            str(path),
+            "exec",
+            flags=__future__.annotations.compiler_flag,
+        ),
+        namespace,
+    )
+    assert (
+        namespace["allocate"](
+            lambda value: value, group, capacity, SimpleNamespace(type="cuda")
+        )
+        is state
+    )
+
+
+@pytest.mark.parametrize("m", [0, 33, 255, 8193, 8224])
+def test_standalone_projection_rejects_unsupported_launch_m(m):
+    import __future__
+
+    from types import SimpleNamespace
+
+    path = OPS / "mnnvl_cutedsl_symmetric_up_projection.py"
+    tree = ast.parse(path.read_text())
+    cls = next(
+        n
+        for n in tree.body
+        if isinstance(n, ast.ClassDef) and n.name == "BoundSymmetricUpProjection"
+    )
+    node = next(
+        n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "prepare"
+    )
+    node.decorator_list = []
+
+    def vote(group, identity, error):
+        raise ValueError(error)
+
+    namespace = {"_vote": vote}
+    exec(
+        compile(
+            ast.Module(body=[node], type_ignores=[]),
+            str(path),
+            "exec",
+            flags=__future__.annotations.compiler_flag,
+        ),
+        namespace,
+    )
+    output = SimpleNamespace(tensor=SimpleNamespace(shape=(m, 7168)), group=object())
+    with pytest.raises(ValueError, match="256 <= M <= 8192"):
+        namespace["prepare"](
+            None,
+            None,
+            None,
+            None,
+            None,
+            output,
+            residual_is_replicated=True,
+            tuning=None,
+            skip_entry_sync=False,
+        )
