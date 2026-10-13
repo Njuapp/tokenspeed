@@ -57,6 +57,8 @@ _TACTICS = tuple(
         (128, 256),
         (512, 1024),
         ("static", "atomic_counter"),
+        # Exclude reuse_dispatch_warps to avoid allocating its large
+        # FC2 staging buffer in the fixed workspace.
         ("epi_warps",),
         (1, 4, 8),
     )
