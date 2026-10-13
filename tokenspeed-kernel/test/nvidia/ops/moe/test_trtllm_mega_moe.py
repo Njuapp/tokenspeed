@@ -31,7 +31,8 @@ import os
 import tempfile
 from contextlib import nullcontext
 from datetime import timedelta
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -332,6 +333,9 @@ def run_correctness(capacity: int, live_tokens: int, tune: bool):
         dist.group.WORLD, w.num_experts, HIDDEN, INTERMEDIATE, TOP_K, 4.0, 25.0
     )
     arena = runner.workspace
+    # The fixed arena covers all tactics, including those not selected here.
+    assert "fc2_output_workspace" not in arena.offsets["local"]
+    assert "fc2_done_counter" not in arena.offsets["local"]
     pointers = (
         arena.storage.data_ptr(),
         arena.local.data_ptr(),
@@ -368,6 +372,18 @@ def run_correctness(capacity: int, live_tokens: int, tune: bool):
             "PASS NVFP4 SiTU MegaMoE eager, graph replay, idle ranks, and shared-arena capacity switching",
             flush=True,
         )
+
+
+@pytest.mark.parametrize("capacity", [1, 1024, 2048, 8192, 16384, 32768])
+@pytest.mark.parametrize("tactic", [None, -1])
+def test_mega_moe_heuristic_uses_a_workspace_tactic(capacity, tactic):
+    from tokenspeed_kernel.thirdparty.cute_dsl.mega_moe.runner import MegaMoERunner
+
+    runner = SimpleNamespace(workspace=SimpleNamespace(run=Mock()))
+    inputs = [None] * 11 + [SimpleNamespace(shape=(capacity, HIDDEN))]
+    MegaMoERunner.forward(runner, inputs, tactic)
+    selected = runner.workspace.run.call_args.args[-1]
+    assert selected in MegaMoERunner.TACTICS
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

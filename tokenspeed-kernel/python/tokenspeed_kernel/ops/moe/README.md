@@ -289,3 +289,16 @@ call and the Torch statements otherwise. The GPU tests
 (`test/nvidia/ops/moe/test_router_select_cuda.py`) pin Torch's FP32 sigmoid and
 K8 sum order first (a mismatch fails, never skips), then compare the two byte for
 byte on random rows, tie, edge and NaN corpora and in CUDA-graph replay.
+
+## MegaMoE token-back workspace
+
+The NVFP4 SiTU runner uses `epi_warps` for BF16 token-back. Its fixed
+workspace takes the largest region sizes across all supported tactics.
+Including `reuse_dispatch_warps` would allocate an FC2 staging buffer even
+when autotuning is off and the heuristic selects `epi_warps`.
+
+The candidate set and the large-capacity heuristic both use `epi_warps`.
+This removes the FC2 staging buffer and its completion counter from the
+workspace. At K3 geometry with EP16 and a capacity of 8192 tokens per rank,
+the staging buffer alone would use about 14 GiB per GPU. The tuning-cache
+identity excludes selections saved before this change.
