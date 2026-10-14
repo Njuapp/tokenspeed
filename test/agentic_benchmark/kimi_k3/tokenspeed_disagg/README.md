@@ -27,7 +27,7 @@ are `ts` and `/data:/data`. For 1P1D, `DISAGGREGATION_IB_DEVICE` defaults to
 `mlx5_0,mlx5_1,mlx5_2,mlx5_3`. Override it for a different NIC layout.
 
 The ADP16/EP16 config uses `--moe-backend mega_moe` for the target model
-and `--draft-moe-backend flashinfer_trtllm` for the EAGLE3 draft model.
+and `--draft-moe-backend mega_moe` for the EAGLE3 draft model.
 MegaMoE owns dispatch and combine, so `--all2all-backend none` is explicit.
 
 ## Dataset
