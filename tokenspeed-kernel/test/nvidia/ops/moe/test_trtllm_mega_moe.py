@@ -44,8 +44,10 @@ if not is_nvidia():
 from flashinfer.autotuner import AutoTuner  # noqa: E402
 from tokenspeed_kernel.ops.moe import (  # noqa: E402
     moe_apply,
+    moe_input_buffers,
     moe_plan,
     moe_process_weights,
+    moe_topk,
 )
 from tokenspeed_kernel.ops.quantization.flashinfer import fp4_quantize  # noqa: E402
 from tokenspeed_kernel.ops.tuning import (  # noqa: E402
@@ -218,6 +220,102 @@ def _check(output, expected, label):
     assert error < 0.005, (label, error.item())
 
 
+def _check_direct_inputs(plan, w, reference, capacity: int, tune: bool):
+    bias = torch.randn(w.num_experts, device="cuda", dtype=torch.float32) * 0.01
+    for case, count in enumerate((max(1, capacity - 1), 0, 1)):
+        tokens = count if dist.get_rank() == 0 else max(1, count - 2)
+        dense = torch.randn(tokens, HIDDEN, device="cuda", dtype=torch.bfloat16)
+        logits = torch.randn(tokens, w.num_experts, device="cuda")
+        buffers = moe_input_buffers(plan, w, tokens, capacity)
+        assert buffers is not None
+
+        def source_inputs():
+            if tokens:
+                q, sf = fp4_quantize(
+                    dense,
+                    w.w13_input_scale_quant,
+                    is_sf_swizzled_layout=False,
+                    enable_pdl=False,
+                )
+            else:
+                q, sf = buffers.activation.clone(), buffers.scales.clone()
+            scores, ids = moe_topk(
+                logits,
+                TOP_K,
+                score_function="sigmoid",
+                selection_method="topk",
+                renormalize=True,
+                routed_scaling_factor=2.5,
+                correction_bias=bias,
+                topk_weights_dtype=torch.bfloat16,
+            )
+            return (q, sf), ids, scores
+
+        def produce_and_run():
+            x = fp4_quantize(
+                dense,
+                w.w13_input_scale_quant,
+                is_sf_swizzled_layout=False,
+                enable_pdl=False,
+                out=(buffers.activation, buffers.scales),
+            )
+            scores, ids = moe_topk(
+                logits,
+                TOP_K,
+                score_function="sigmoid",
+                selection_method="topk",
+                renormalize=True,
+                routed_scaling_factor=2.5,
+                correction_bias=bias,
+                topk_weights_dtype=torch.bfloat16,
+                topk_indices_dtype=torch.int64,
+                out=(buffers.topk_weights, buffers.topk_ids),
+            )
+            return moe_apply(
+                plan,
+                x,
+                w,
+                None,
+                topk_weights=scores,
+                topk_ids=ids,
+                num_tokens_global=capacity * dist.get_world_size(),
+                max_num_tokens_per_gpu=capacity,
+                do_finalize=True,
+                low_latency=None,
+                overlap_fn=None,
+                shared_input=None,
+                shared_weight=None,
+                shared_out=None,
+            )
+
+        source, ids, scores = source_inputs()
+        expected = _reference(source, ids, scores, reference, capacity)
+        with autotune(tune_mode=tune, tuning_buckets=None, round_up=None):
+            actual = produce_and_run()
+        torch.cuda.synchronize()
+        _check(actual, expected, f"direct eager case {case}")
+        torch.testing.assert_close(buffers.activation, source[0], atol=0, rtol=0)
+        torch.testing.assert_close(buffers.scales[:tokens], source[1], atol=0, rtol=0)
+        torch.testing.assert_close(buffers.topk_ids, ids.long(), atol=0, rtol=0)
+        torch.testing.assert_close(buffers.topk_weights, scores.float(), atol=0, rtol=0)
+        # No copies occur in the warmed serving sequence, including the producers.
+        with patch.object(
+            torch.Tensor, "copy_", side_effect=AssertionError("direct inputs copied")
+        ):
+            produce_and_run()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = produce_and_run()
+        dense.normal_()
+        logits.normal_()
+        source, ids, scores = source_inputs()
+        expected = _reference(source, ids, scores, reference, capacity)
+        for _ in range(3):
+            graph.replay()
+        torch.cuda.synchronize()
+        _check(captured, expected, f"direct changed-input graph case {case}")
+
+
 def run_correctness(capacity: int, live_tokens: int, tune: bool):
     torch.manual_seed(713 + dist.get_rank())
     plan = moe_plan(
@@ -244,6 +342,7 @@ def run_correctness(capacity: int, live_tokens: int, tune: bool):
         combine_order="rank",
     )
     w, ref = _weights(plan)
+    _check_direct_inputs(plan, w, ref, capacity, tune)
     tokens = live_tokens if dist.get_rank() == 0 else max(1, live_tokens - 2)
     x, ids, weights = _inputs(tokens, w.num_experts)
 

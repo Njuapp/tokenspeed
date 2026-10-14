@@ -28,6 +28,42 @@ def test_topk_call_can_override_configured_output_format() -> None:
     assert output.router_logits is router_logits
 
 
+def test_grouped_sigmoid_route_preserves_output_buffers(monkeypatch) -> None:
+    weights = torch.empty(3, 2, dtype=torch.float32)
+    ids = torch.empty(3, 2, dtype=torch.int64)
+    buffers = (weights, ids)
+
+    def fake_topk(logits, top_k, **kwargs):
+        assert top_k == 2
+        assert kwargs["out"] is buffers
+        assert kwargs["topk_indices_dtype"] == torch.int64
+        assert kwargs["topk_weights_dtype"] == torch.bfloat16
+        weights.fill_(0.25)
+        ids.fill_(1)
+        return buffers
+
+    monkeypatch.setattr(topk_module, "moe_topk", fake_topk)
+    topk = TopK(
+        top_k=2,
+        use_grouped_topk=True,
+        num_expert_group=1,
+        topk_group=1,
+        correction_bias=torch.zeros(8),
+        routed_scaling_factor=2.5,
+        topk_weights_dtype=torch.bfloat16,
+    )
+    output = topk(torch.empty(3, 4), torch.empty(3, 8), out=buffers)
+    assert output.topk_weights is weights
+    assert output.topk_ids is ids
+
+
+def test_bypassed_route_rejects_output_buffers() -> None:
+    topk = TopK(top_k=2, output_format=TopKOutputFormat.BYPASSED)
+    buffers = (torch.empty(3, 2), torch.empty(3, 2, dtype=torch.int64))
+    with pytest.raises(ValueError, match="Bypassed routing"):
+        topk(torch.empty(3, 4), torch.empty(3, 8), out=buffers)
+
+
 def test_plain_route_uses_kernel_package_topk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

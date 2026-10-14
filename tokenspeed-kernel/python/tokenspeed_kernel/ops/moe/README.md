@@ -302,3 +302,32 @@ This removes the FC2 staging buffer and its completion counter from the
 workspace. At K3 geometry with EP16 and a capacity of 8192 tokens per rank,
 the staging buffer alone would use about 14 GiB per GPU. The tuning-cache
 identity excludes selections saved before this change.
+
+## MegaMoE producer input buffers
+
+`moe_input_buffers(plan, w, num_tokens, max_num_tokens_per_gpu)` exposes the
+selected kernel's producer outputs. It returns `None` for kernels without
+this interface. Initialize the views before CUDA graph capture.
+
+K3 NVFP4 routing and quantization write directly into these views.
+Packed activation, linear block scales, and FP32 routing-weight storage use
+one symmetric allocation. Expert IDs use local INT64 storage.
+The quantizer reserves scale rows rounded up to 16. It returns only valid
+token rows. Routing stores preserve the previous FP32 to BF16 to FP32
+rounding of the K3 weights.
+
+All EP ranks use the same capacity. The launch masks unused expert-ID rows
+with `-1`, including on idle ranks. A caller must finish the previous
+consumer before another producer overwrites the same workspace. The views
+share the existing workspace across layers, token buckets, and tactics.
+
+The adapter skips staging when inputs already use these views. External
+prequantized inputs retain the existing staging behavior. Both forms use
+the same MegaMoE compute kernel.
+
+Autotune fills the registered input views before each profile's timed
+tactic loop. Cold-L2 samples retain their input addresses and rotate only
+the local output. The tuning context saves and restores the current
+producer results around profiling. These startup copies do not run in
+the warmed serving path. The cache identity separates these measurements
+from profiles that included four input copies.
