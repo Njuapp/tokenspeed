@@ -316,6 +316,9 @@ The quantizer reserves scale rows rounded up to 16. It returns only valid
 token rows. Routing stores preserve the previous FP32 to BF16 to FP32
 rounding of the K3 weights.
 
+The NVIDIA packed routing entries accept these output buffers. The AMD
+gfx1250 entries keep their existing allocating interfaces.
+
 All EP ranks use the same capacity. The launch masks unused expert-ID rows
 with `-1`, including on idle ranks. A caller must finish the previous
 consumer before another producer overwrites the same workspace. The views
@@ -325,9 +328,8 @@ The adapter skips staging when inputs already use these views. External
 prequantized inputs retain the existing staging behavior. Both forms use
 the same MegaMoE compute kernel.
 
-Autotune fills the registered input views before each profile's timed
-tactic loop. Cold-L2 samples retain their input addresses and rotate only
-the local output. The tuning context saves and restores the current
-producer results around profiling. These startup copies do not run in
-the warmed serving path. The cache identity separates these measurements
-from profiles that included four input copies.
+Autotune retains its existing measurement path, including input staging
+copies, and its existing cache identity. Profiling overwrites the same
+workspace used by the producers. Treat autotuning calls that use these
+views as warmup: discard their outputs and regenerate the inputs before
+inference. TokenSpeed runs autotuning on dummy inputs during startup.

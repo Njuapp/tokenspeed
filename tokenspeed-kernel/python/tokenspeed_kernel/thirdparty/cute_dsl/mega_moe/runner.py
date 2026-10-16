@@ -43,7 +43,7 @@ from flashinfer.autotuner import (
     is_in_profile_measurement,
 )
 from tokenspeed_kernel.ops.moe._input_buffers import MoEInputBuffers
-from tokenspeed_kernel.ops.tuning import get_autotune_max_num_tokens, is_autotuning
+from tokenspeed_kernel.ops.tuning import get_autotune_max_num_tokens
 from tokenspeed_kernel.thirdparty.cute_dsl.mega_moe.megamoe_kernel import (
     Sm100MegaMoEKernel,
     _layout_regions,
@@ -398,7 +398,7 @@ class MegaMoERunner(TunableRunner):
         self.max_capacity = max_capacity
         self.tactic_autotune = os.environ.get("MEGAMOE_TACTIC_AUTOTUNE", "0") == "1"
         self._extras = (
-            "nvfp4_situ_bf16_graph_direct_inputs_epi_only_v5",
+            "nvfp4_situ_bf16_graph_fixed_workspace_epi_only_v4",
             self.world,
             num_experts,
             hidden,
@@ -420,20 +420,6 @@ class MegaMoERunner(TunableRunner):
                 shapes
             )
 
-        def prepare_profile_inputs(inputs):
-            workspace = self._ensure_workspace()
-            capacity = inputs[11].shape[0]
-            workspace.stage_inputs(
-                (inputs[0], inputs[1]), inputs[2], inputs[3], capacity
-            )
-            return [
-                workspace.x[:capacity],
-                workspace.scales[:capacity].view(torch.uint8),
-                workspace.topk_ids[:capacity],
-                workspace.topk_weights[:capacity],
-                *inputs[4:],
-            ]
-
         self.tuning_config = TuningConfig(
             dynamic_tensor_specs=(
                 DynamicTensorSpec((11,), (0,), _token_buckets, _token_capacity),
@@ -450,9 +436,6 @@ class MegaMoERunner(TunableRunner):
             ),
             use_cold_l2_cache=True,
             use_cuda_graph=True,
-            inputs_pre_hook=prepare_profile_inputs,
-            # Keep registered input pointers fixed across cold-L2 samples.
-            profile_arena_input_indices=(11,),
         )
 
     def __hash__(self) -> int:
@@ -532,26 +515,12 @@ class MegaMoERunner(TunableRunner):
         ]
         if not self.tactic_autotune:
             return self.forward(inputs, tactic=-1)
-        # Profiling temporarily fills the same arena with synthetic inputs.
-        # Preserve this warmup call's producer results before profiling starts.
-        saved_inputs = (
-            [tensor.clone() for tensor in inputs[:4]] if is_autotuning() else None
+        chosen, tactic = AutoTuner.get().choose_one(
+            custom_op="trtllm_nvfp4_mega_moe",
+            runners=[self],
+            tuning_config=self.tuning_config,
+            inputs=inputs,
         )
-        try:
-            chosen, tactic = AutoTuner.get().choose_one(
-                custom_op="trtllm_nvfp4_mega_moe",
-                runners=[self],
-                tuning_config=self.tuning_config,
-                inputs=inputs,
-            )
-        finally:
-            if saved_inputs is not None:
-                workspace.stage_inputs(
-                    (saved_inputs[0], saved_inputs[1]),
-                    saved_inputs[2],
-                    saved_inputs[3],
-                    capacity,
-                )
         return chosen(inputs=inputs, tactic=tactic)
 
 

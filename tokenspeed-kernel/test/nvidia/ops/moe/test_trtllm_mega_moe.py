@@ -20,6 +20,9 @@
 
 """NVFP4 MegaMoE SiTU correctness at K3 geometry, including EP and graph replay.
 
+Producer values and buffer bounds are covered by test_mega_moe_input_producers.py.
+This module checks final MoE outputs, staging copies, and workspace graph replay.
+
 Run directly with torchrun; WORLD_SIZE=16 uses all 896 K3 experts.
 Pass --autotune to sweep all tactics before checking eager and graph results.
 """
@@ -229,16 +232,16 @@ def _check_direct_inputs(plan, w, reference, capacity: int, tune: bool):
         buffers = moe_input_buffers(plan, w, tokens, capacity)
         assert buffers is not None
 
-        def source_inputs():
+        def expected_output():
             if tokens:
-                q, sf = fp4_quantize(
+                x = fp4_quantize(
                     dense,
                     w.w13_input_scale_quant,
                     is_sf_swizzled_layout=False,
                     enable_pdl=False,
                 )
             else:
-                q, sf = buffers.activation.clone(), buffers.scales.clone()
+                x = (buffers.activation, buffers.scales)
             scores, ids = moe_topk(
                 logits,
                 TOP_K,
@@ -249,7 +252,7 @@ def _check_direct_inputs(plan, w, reference, capacity: int, tune: bool):
                 correction_bias=bias,
                 topk_weights_dtype=torch.bfloat16,
             )
-            return (q, sf), ids, scores
+            return _reference(x, ids, scores, reference, capacity)
 
         def produce_and_run():
             x = fp4_quantize(
@@ -288,28 +291,23 @@ def _check_direct_inputs(plan, w, reference, capacity: int, tune: bool):
                 shared_out=None,
             )
 
-        source, ids, scores = source_inputs()
-        expected = _reference(source, ids, scores, reference, capacity)
+        expected = expected_output()
         with autotune(tune_mode=tune, tuning_buckets=None, round_up=None):
-            actual = produce_and_run()
-        torch.cuda.synchronize()
-        _check(actual, expected, f"direct eager case {case}")
-        torch.testing.assert_close(buffers.activation, source[0], atol=0, rtol=0)
-        torch.testing.assert_close(buffers.scales[:tokens], source[1], atol=0, rtol=0)
-        torch.testing.assert_close(buffers.topk_ids, ids.long(), atol=0, rtol=0)
-        torch.testing.assert_close(buffers.topk_weights, scores.float(), atol=0, rtol=0)
-        # No copies occur in the warmed serving sequence, including the producers.
+            produce_and_run()
+        # Profiling may overwrite producer views. Regenerate inputs and check
+        # the warmed sequence for Tensor.copy_ calls.
         with patch.object(
             torch.Tensor, "copy_", side_effect=AssertionError("direct inputs copied")
         ):
-            produce_and_run()
+            actual = produce_and_run()
+        torch.cuda.synchronize()
+        _check(actual, expected, f"direct eager case {case}")
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             captured = produce_and_run()
         dense.normal_()
         logits.normal_()
-        source, ids, scores = source_inputs()
-        expected = _reference(source, ids, scores, reference, capacity)
+        expected = expected_output()
         for _ in range(3):
             graph.replay()
         torch.cuda.synchronize()

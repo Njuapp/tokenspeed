@@ -195,7 +195,6 @@ _PACKED_ROWS_CDNA5 = range(2, 513)
 _PACKED_CONTRACT = {
     "experts": frozenset({896}),
     "topk": frozenset({16}),
-    "supports_output_buffers": frozenset({True}),
 }
 
 
@@ -246,7 +245,11 @@ _PACKED_SIGNATURES = format_signatures("router_logits", "dense", {torch.float32}
     capability=CapabilityRequirement(vendors=frozenset({"nvidia"})),
     signatures=_PACKED_SIGNATURES,
     priority=Priority.SPECIALIZED,
-    traits={**_PACKED_CONTRACT, "tokens": _PACKED_ROWS_NVIDIA},
+    traits={
+        **_PACKED_CONTRACT,
+        "tokens": _PACKED_ROWS_NVIDIA,
+        "supports_output_buffers": frozenset({True}),
+    },
 )
 def triton_kimi3_packed_sigmoid_bias_topk_nvidia(
     *,
@@ -284,7 +287,11 @@ def triton_kimi3_packed_sigmoid_bias_topk_nvidia(
     capability=CapabilityRequirement(vendors=frozenset({"nvidia"})),
     signatures=_PACKED_SIGNATURES,
     priority=Priority.SPECIALIZED,
-    traits={**_PACKED_CONTRACT, "tokens": _PACKED_ROWS_NVIDIA},
+    traits={
+        **_PACKED_CONTRACT,
+        "tokens": _PACKED_ROWS_NVIDIA,
+        "supports_output_buffers": frozenset({True}),
+    },
 )
 def triton_kimi3_packed_sigmoid_bias_topk_nvidia_mapped(
     *,
@@ -338,7 +345,6 @@ def triton_kimi3_packed_sigmoid_bias_topk_gfx1250(
     routed_scaling_factor: float,
     normalize_topk_weights: bool,
     weights_dtype: torch.dtype,
-    out: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return packed top-16 weights and ids for FP32 ``[tokens, 896]`` logits.
 
@@ -354,7 +360,6 @@ def triton_kimi3_packed_sigmoid_bias_topk_gfx1250(
         routed_scaling_factor=routed_scaling_factor,
         normalize_topk_weights=normalize_topk_weights,
         weights_dtype=weights_dtype,
-        out=out,
     )
 
 
@@ -381,7 +386,6 @@ def triton_kimi3_packed_sigmoid_bias_topk_gfx1250_mapped(
     normalize_topk_weights: bool,
     logical_to_physical_map: torch.Tensor,
     weights_dtype: torch.dtype,
-    out: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return packed top-16 weights and ids for FP32 ``[tokens, 896]`` logits.
 
@@ -398,7 +402,6 @@ def triton_kimi3_packed_sigmoid_bias_topk_gfx1250_mapped(
         normalize_topk_weights=normalize_topk_weights,
         logical_to_physical_map=logical_to_physical_map,
         weights_dtype=weights_dtype,
-        out=out,
     )
 
 

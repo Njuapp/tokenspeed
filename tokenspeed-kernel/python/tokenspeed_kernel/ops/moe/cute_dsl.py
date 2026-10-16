@@ -153,8 +153,8 @@ def trtllm_nvfp4_mega_moe_apply(
     Uses the upstream heuristic by default. Set MEGAMOE_TACTIC_AUTOTUNE=1
     identically on every EP rank before startup to participate in FlashInfer's
     autotuning context and reuse tuned tactics across compatible layers.
-    Autotuning stages profile inputs before timing. One buffer set sized by
-    the configured autotuning maximum backs all token views and tactics.
+    Autotuning includes input staging in each measured call. One buffer set
+    sized by the configured autotuning maximum backs all token views and tactics.
     Fixed scratch offsets let captured calls alternate sizes without host resets.
     Outside tuning, cache misses use the heuristic tactic. Tune and warm up
     before CUDA graph capture; all EP ranks must enter with identical caches.

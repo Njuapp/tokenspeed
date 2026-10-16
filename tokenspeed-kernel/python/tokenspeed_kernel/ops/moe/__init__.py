@@ -1522,6 +1522,8 @@ def moe_input_buffers(
         Input views when the kernel provides them, or None otherwise.
         Scale rows include the NVFP4 quantizer's padding to 16 rows.
         Use the views only until the next call using the same workspace.
+        Autotuning may overwrite the views. Discard tuning-call outputs and
+        regenerate the inputs before inference.
         Initialize the views eagerly before capturing a CUDA graph.
     """
     if plan["apply_kernel_name"] != "trtllm_nvfp4_mega_moe_apply":
