@@ -2570,6 +2570,21 @@ class KimiLinearMoE(nn.Module):
         if max_tokens == 0:
             return prefix_sum
 
+        quant_out = None
+        routing_out = None
+        if (
+            self.execution_plan.use_mega_moe
+            and self.experts.plan["apply_kernel_name"] == "trtllm_nvfp4_mega_moe_apply"
+        ):
+            from tokenspeed_kernel.thirdparty.cute_dsl.mega_moe import runner
+
+            moe_runner = runner.get_runner(self.experts.plan, self.experts)
+            activation, scales, ids, weights = moe_runner.input_buffers(
+                num_tokens, max_tokens
+            )
+            quant_out = (activation, scales)
+            routing_out = (weights, ids)
+
         shared_communication = None
         if self.shared_experts.shared_parallel is not None:
             shared_communication = self.shared_experts.shared_communication
@@ -2600,22 +2615,26 @@ class KimiLinearMoE(nn.Module):
                     output_format=TopKOutputFormat.STANDARD,
                     num_token_non_padded=None,
                     expert_location_dispatch_info=None,
+                    out=routing_out,
                 )
                 routed_input, _ = self.routed_expert_down_proj(hidden_states)
                 topk_ids = topk.topk_ids
                 topk_weights = topk.topk_weights
             else:
                 routed_input = hidden_states.new_empty((0, self.routed_hidden))
-                topk_ids = torch.empty(
-                    (0, self.top_k),
-                    dtype=self.topk.topk_config.topk_indices_dtype,
-                    device=hidden_states.device,
-                )
-                topk_weights = torch.empty(
-                    (0, self.top_k),
-                    dtype=self.topk.topk_config.topk_weights_dtype,
-                    device=hidden_states.device,
-                )
+                if routing_out is not None:
+                    topk_weights, topk_ids = routing_out
+                else:
+                    topk_ids = torch.empty(
+                        (0, self.top_k),
+                        dtype=self.topk.topk_config.topk_indices_dtype,
+                        device=hidden_states.device,
+                    )
+                    topk_weights = torch.empty(
+                        (0, self.top_k),
+                        dtype=self.topk.topk_config.topk_weights_dtype,
+                        device=hidden_states.device,
+                    )
 
             if self.experts.plan["weight_dtype"] == "nvfp4":
                 if num_tokens > 0:
@@ -2624,15 +2643,20 @@ class KimiLinearMoE(nn.Module):
                         self.experts.w13_input_scale_quant,
                         is_sf_swizzled_layout=False,
                         enable_pdl=pdl_enabled(),
+                        out=quant_out,
                     )
                 else:
                     routed_input = (
-                        hidden_states.new_empty(
-                            (0, self.routed_hidden // 2), dtype=torch.uint8
-                        ),
-                        hidden_states.new_empty(
-                            (0, self.routed_hidden // 16), dtype=torch.uint8
-                        ),
+                        quant_out
+                        if quant_out is not None
+                        else (
+                            hidden_states.new_empty(
+                                (0, self.routed_hidden // 2), dtype=torch.uint8
+                            ),
+                            hidden_states.new_empty(
+                                (0, self.routed_hidden // 16), dtype=torch.uint8
+                            ),
+                        )
                     )
 
             if shared_communication is not None:
