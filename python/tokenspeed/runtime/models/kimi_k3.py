@@ -2572,10 +2572,7 @@ class KimiLinearMoE(nn.Module):
 
         quant_out = None
         routing_out = None
-        if (
-            self.execution_plan.use_mega_moe
-            and self.experts.plan["apply_kernel_name"] == "trtllm_nvfp4_mega_moe_apply"
-        ):
+        if self.execution_plan.use_mega_moe:
             from tokenspeed_kernel.thirdparty.cute_dsl.mega_moe import runner
 
             moe_runner = runner.get_runner(self.experts.plan, self.experts)
