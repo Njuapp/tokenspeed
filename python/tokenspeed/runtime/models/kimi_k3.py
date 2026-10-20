@@ -1924,7 +1924,7 @@ class KimiLinearMoE(nn.Module):
             if moe_backend.is_gluon_petit()
             else All2AllBackend.NONE
         )
-        if self.execution_plan.use_mega_moe and (
+        if self.execution_plan.owns_ep_communication and (
             mapping.attn.dp_size <= 1 or all2all_backend is not fused_all2all_backend
         ):
             raise ValueError(
@@ -1951,7 +1951,11 @@ class KimiLinearMoE(nn.Module):
         # AUTO intentionally requests the flashinfer-backed SiTU plan when it was
         # registered at import time; AUTO cannot override MoELayer per model.
         plan = self.execution_plan
-        if not plan.use_mega_moe and not plan.use_native and not plan.use_marlin:
+        if (
+            not plan.owns_ep_communication
+            and not plan.use_native
+            and not plan.use_marlin
+        ):
             if not plan.use_trtllm:
                 raise RuntimeError(
                     "Kimi-K3 MXFP4 SiTU MoE requires the native, FlashInfer "
@@ -2014,7 +2018,7 @@ class KimiLinearMoE(nn.Module):
                 )
             expected_a2a = (
                 fused_all2all_backend.value
-                if self.execution_plan.use_mega_moe
+                if self.execution_plan.owns_ep_communication
                 else "none"
             )
             if self.experts.plan.get("a2a_backend") not in (None, expected_a2a):
@@ -2044,7 +2048,7 @@ class KimiLinearMoE(nn.Module):
             # without a cast. This setting is unused by kernel-routing plans.
             topk_weights_dtype=(
                 torch.bfloat16
-                if plan.use_trtllm or plan.use_mega_moe
+                if plan.use_trtllm or plan.owns_ep_communication
                 else torch.float32
             ),
         )
@@ -2149,7 +2153,7 @@ class KimiLinearMoE(nn.Module):
 
         if mapping.attn.dp_size > 1:
             self.moe_alltoall = None
-            if self.execution_plan.use_mega_moe:
+            if self.execution_plan.owns_ep_communication:
                 if layer_index == config.first_k_dense_replace:
                     logger.info(
                         f"K3 routed MoE: {moe_backend.value} SiTU MegaMoE (EP={mapping.moe.ep_size})",
@@ -2324,7 +2328,10 @@ class KimiLinearMoE(nn.Module):
         """Run the selected SiTU MoE (kernel-routing or precomputed-TopK)."""
         plan = self.execution_plan
         if not (
-            plan.use_mega_moe or plan.use_native or plan.use_trtllm or plan.use_marlin
+            plan.owns_ep_communication
+            or plan.use_native
+            or plan.use_trtllm
+            or plan.use_marlin
         ):
             raise RuntimeError(
                 "Kimi-K3 has no portable SiTU Triton fallback; use the native, "
@@ -2661,7 +2668,7 @@ class KimiLinearMoE(nn.Module):
                 # the all-gather fallback and ranks with no local tokens.
                 fork.join_checkpoint()
 
-            if self.execution_plan.use_mega_moe:
+            if self.execution_plan.owns_ep_communication:
                 pass
             elif self.moe_alltoall is not None:
                 routed_input, topk_ids, topk_weights, combine_offset = (
@@ -2700,7 +2707,7 @@ class KimiLinearMoE(nn.Module):
                     shared_output = shared_communication.reduce_outputs(
                         shared_output, num_tokens
                     )
-                if self.execution_plan.use_mega_moe:
+                if self.execution_plan.owns_ep_communication:
                     # MegaMoE owns dispatch/combine inside the expert call;
                     # its communication cannot overlap the shared collective.
                     fork.join()
@@ -2724,7 +2731,7 @@ class KimiLinearMoE(nn.Module):
                 # concurrently: combine starts only after shared RS completes.
                 fork.join()
 
-            if self.execution_plan.use_mega_moe:
+            if self.execution_plan.owns_ep_communication:
                 pass
             elif self.moe_alltoall is not None:
                 routed_output = self.moe_alltoall.combine(
