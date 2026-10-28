@@ -54,7 +54,7 @@ _runners: dict[tuple, MegaMoERunner] = {}
 _TACTICS = tuple(
     (tile_n, group_hint, scheduler, token_back, flag_batch)
     for tile_n, group_hint, scheduler, token_back, flag_batch in itertools.product(
-        (128, 256),
+        (64, 128, 256),
         (512, 1024),
         ("static", "atomic_counter"),
         # Exclude reuse_dispatch_warps to avoid allocating its large
@@ -109,6 +109,7 @@ class MegaMoEWorkspace:
         self.situ_beta = situ_beta
         self.situ_linear_beta = situ_linear_beta
         self.world = dist.get_world_size(group)
+        self.device_capability = torch.cuda.get_device_capability()
         self.key = (
             torch.cuda.current_device(),
             self.world,
@@ -155,6 +156,7 @@ class MegaMoEWorkspace:
             (((capacity + 15) // 16 * 16, sf_cols), torch.float8_e4m3fn),
             ((capacity, top_k), torch.float32),
             ((sizes["shared"],), torch.uint8),
+            ((capacity, top_k), torch.int64),
         ]
         nbytes = [
             shape[0] * (shape[1] if len(shape) == 2 else 1) * dtype.itemsize
@@ -174,10 +176,8 @@ class MegaMoEWorkspace:
                 .view(shape)
             )
             offset += size
-        self.x, self.scales, self.topk_weights, self.shared = regions
-        self.topk_ids = torch.full(
-            (capacity, top_k), -1, dtype=torch.int64, device=device
-        )
+        self.x, self.scales, self.topk_weights, self.shared, self.topk_ids = regions
+        self.topk_ids.fill_(-1)
         self.local = torch.zeros(sizes["local"], dtype=torch.uint8, device=device)
         self.output = torch.empty(
             (capacity, hidden), dtype=torch.bfloat16, device=device
@@ -196,6 +196,48 @@ class MegaMoEWorkspace:
 
     def _make_kernel(self, capacity: int, tactic: tuple):
         tile_n, group_hint, scheduler, token_back, flag_batch = tactic
+        # Use the shared Blackwell implementation for small K3 EP16 capacities.
+        fuse_bf16_reduce = (
+            self.device_capability in ((10, 0), (10, 3))
+            and self.world == 16
+            and self.num_experts == 896
+            and self.hidden == 3584
+            and self.intermediate == 3072
+            and self.top_k == 16
+            and self.situ_beta == 4.0
+            and self.situ_linear_beta == 25.0
+            and 4 <= capacity <= 32
+            and token_back == "epi_warps"
+        )
+        # More workers help the small standalone BF16 reduction. The fused
+        # tail and unmeasured capacities keep the established width.
+        bf16_hidden_per_thread = (
+            2
+            if self.device_capability in ((10, 0), (10, 3))
+            and self.world == 16
+            and self.num_experts == 896
+            and self.hidden == 3584
+            and self.intermediate == 3072
+            and self.top_k == 16
+            and self.situ_beta == 4.0
+            and self.situ_linear_beta == 25.0
+            and capacity in (1, 2, 64)
+            and not fuse_bf16_reduce
+            else 8
+        )
+        # The collective caller supplies one capacity for all EP ranks.
+        dense_routing = (
+            self.device_capability in ((10, 0), (10, 3))
+            and self.world == 16
+            and self.num_experts == 896
+            and self.hidden == 3584
+            and self.intermediate == 3072
+            and self.top_k == 16
+            and self.situ_beta == 4.0
+            and self.situ_linear_beta == 25.0
+            and capacity in (1, 2, 4)
+            and token_back == "epi_warps"
+        )
         return Sm100MegaMoEKernel(
             mma_tiler_mnk=(256, tile_n, 256),
             cluster_shape_mnk=(2, 1, 1),
@@ -220,6 +262,9 @@ class MegaMoEWorkspace:
             max_tokens_per_rank=capacity,
             hidden=self.hidden,
             fc2_output_dtype=cutlass.BFloat16,
+            fuse_bf16_reduce=fuse_bf16_reduce,
+            bf16_hidden_per_thread=bf16_hidden_per_thread,
+            dense_routing=dense_routing,
             combine_format=CombineFormat.parse("bf16"),
             non_ubulk_fc2_store=token_back != "epi_warps",
             in_kernel_fc2_reduce=False,
@@ -357,7 +402,13 @@ class MegaMoEWorkspace:
         kwargs = dict(
             kwargs, stream=cuda.CUstream(torch.cuda.current_stream().cuda_stream)
         )
-        kernel_key = (*self.key, capacity, tactic)
+        kernel_key = (
+            *self.key,
+            capacity,
+            tactic,
+            kernel.bf16_hidden_per_thread,
+            kernel.dense_routing,
+        )
         compiled = self._kernel_cache.get(kernel_key)
         if compiled is None:
             if torch.cuda.is_current_stream_capturing():
@@ -399,7 +450,7 @@ class MegaMoERunner(TunableRunner):
         self.max_capacity = max_capacity
         self.tactic_autotune = os.environ.get("MEGAMOE_TACTIC_AUTOTUNE", "0") == "1"
         self._extras = (
-            "nvfp4_situ_bf16_graph_fixed_workspace_epi_only_v4",
+            "nvfp4_situ_bf16_graph_fixed_workspace_epi_only_v10_blackwell_small_cap124",
             self.world,
             num_experts,
             hidden,
@@ -456,6 +507,27 @@ class MegaMoERunner(TunableRunner):
         if tactic is None or tactic == -1:
             if capacity <= 1024:
                 tactic = (128, 512, "static", "epi_warps", 1)
+                if (
+                    self.workspace.device_capability in ((10, 0), (10, 3))
+                    and (
+                        self.world,
+                        self.num_experts,
+                        self.hidden,
+                        self.intermediate,
+                        self.top_k,
+                        self.situ_beta,
+                        self.situ_linear_beta,
+                    )
+                    == (16, 896, 3584, 3072, 16, 4.0, 25.0)
+                    and capacity <= 64
+                ):
+                    # Use the small-capacity regimes found by the full sweep.
+                    if capacity == 1:
+                        tactic = (64, 512, "static", "epi_warps", 1)
+                    elif capacity <= 32:
+                        tactic = (64, 1024, "atomic_counter", "epi_warps", 1)
+                    else:
+                        tactic = (128, 512, "atomic_counter", "epi_warps", 1)
             elif capacity <= 8192:
                 tactic = (256, 512, "static", "epi_warps", 4)
             else:
@@ -518,7 +590,23 @@ class MegaMoERunner(TunableRunner):
         ]
         if not self.tactic_autotune:
             return self.forward(inputs, tactic=-1)
-        chosen, tactic = AutoTuner.get().choose_one(
+        tuner = AutoTuner.get()
+        if tuner.is_tuning_mode and not torch.cuda.is_current_stream_capturing():
+            # Profiling stages synthetic inputs into this same workspace.
+            # Preserve caller data that producers wrote directly into it.
+            staged_storage = {
+                workspace.storage.untyped_storage().data_ptr(),
+                workspace.topk_ids.untyped_storage().data_ptr(),
+            }
+            inputs[:4] = [
+                (
+                    tensor.clone()
+                    if tensor.untyped_storage().data_ptr() in staged_storage
+                    else tensor
+                )
+                for tensor in inputs[:4]
+            ]
+        chosen, tactic = tuner.choose_one(
             custom_op="trtllm_nvfp4_mega_moe",
             runners=[self],
             tuning_config=self.tuning_config,
