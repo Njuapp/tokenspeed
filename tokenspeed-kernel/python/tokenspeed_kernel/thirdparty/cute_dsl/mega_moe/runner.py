@@ -169,7 +169,8 @@ class MegaMoEWorkspace:
             (((capacity + 15) // 16 * 16, sf_cols), torch.float8_e4m3fn),
             ((capacity, top_k), torch.float32),
             ((sizes["shared"],), torch.uint8),
-            ((capacity, top_k), torch.int64),
+            # Int32 ids: the vendored Kimi-K3 router writes them directly.
+            ((capacity, top_k), torch.int32),
         ]
         nbytes = [
             shape[0] * (shape[1] if len(shape) == 2 else 1) * dtype.itemsize

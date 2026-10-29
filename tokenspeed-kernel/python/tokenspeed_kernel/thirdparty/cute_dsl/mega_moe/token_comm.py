@@ -826,6 +826,11 @@ class TokenInPullTokenBackPush:
                 table_entries + self.num_dispatch_threads - 1
             ) // self.num_dispatch_threads
             ids = cute.make_rmem_tensor((entries_per_thread,), Int64)
+            # Peer tables are read in their own element width (Int32 from the
+            # vendored Kimi-K3 router, Int64 from generic callers) and widened
+            # into the Int64 scratch.
+            idx_dtype = token_comm_args.topk_idx.element_type
+            idx_bytes: cutlass.Constexpr[int] = idx_dtype.width // 8
             # Keep four Int64 values live per thread. Group 0 keeps the v1
             # mapping for rows 0/1. Small capacities skip group 1 entirely;
             # its stale rows are never read. Each group loads before it stores.
@@ -842,15 +847,20 @@ class TokenInPullTokenBackPush:
                             peer_addr = token_comm_args.peer_rank_ptr_mapper.map(
                                 token_comm_args.topk_idx.iterator.toint(),
                                 src_rank,
-                                Int64(source_word) * Int64(8),
+                                Int64(source_word) * Int64(idx_bytes),
                             )
-                            ids[i] = cute.arch.load(
-                                cute.make_ptr(
-                                    Int64, peer_addr, AddressSpace.gmem, assumed_align=8
-                                ),
-                                Int64,
-                                sem="relaxed",
-                                scope="sys",
+                            ids[i] = Int64(
+                                cute.arch.load(
+                                    cute.make_ptr(
+                                        idx_dtype,
+                                        peer_addr,
+                                        AddressSpace.gmem,
+                                        assumed_align=idx_bytes,
+                                    ),
+                                    idx_dtype,
+                                    sem="relaxed",
+                                    scope="sys",
+                                )
                             )
                 for i in cutlass.range_constexpr(entries_per_thread):
                     entry = tid_in_group + Int32(i * self.num_dispatch_threads)
@@ -881,19 +891,21 @@ class TokenInPullTokenBackPush:
                                         token_comm_args.peer_rank_ptr_mapper.map(
                                             token_comm_args.topk_idx.iterator.toint(),
                                             src_rank,
-                                            Int64(source_word) * Int64(8),
+                                            Int64(source_word) * Int64(idx_bytes),
                                         )
                                     )
-                                    ids[i] = cute.arch.load(
-                                        cute.make_ptr(
-                                            Int64,
-                                            peer_addr,
-                                            AddressSpace.gmem,
-                                            assumed_align=8,
-                                        ),
-                                        Int64,
-                                        sem="relaxed",
-                                        scope="sys",
+                                    ids[i] = Int64(
+                                        cute.arch.load(
+                                            cute.make_ptr(
+                                                idx_dtype,
+                                                peer_addr,
+                                                AddressSpace.gmem,
+                                                assumed_align=idx_bytes,
+                                            ),
+                                            idx_dtype,
+                                            sem="relaxed",
+                                            scope="sys",
+                                        )
                                     )
                         for i in cutlass.range_constexpr(entries_per_thread):
                             entry = tid_in_group + Int32(i * self.num_dispatch_threads)

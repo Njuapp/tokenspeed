@@ -1010,7 +1010,7 @@ class Sm100MegaMoEKernel(Sm100SwapABSwigluFp4Fc12Kernel):
         # User-domain inputs (peer-mapped on the symmetric heap).
         activation: cute.Tensor,  # (T, hidden) NVFP4
         activation_sf: cute.Tensor,  # (T, round_up(hidden, sf_atom_block_k)) FP8
-        topk_idx: cute.Tensor,  # (T, num_topk) Int64
+        topk_idx: cute.Tensor,  # (T, num_topk) Int32
         topk_weights: cute.Tensor,  # (T, num_topk) Float32
         # Per-rank model weights (local-only; not in workspace).
         fc1_weight: cute.Tensor,
@@ -1044,9 +1044,9 @@ class Sm100MegaMoEKernel(Sm100SwapABSwigluFp4Fc12Kernel):
             runs (``peer_rank_ptr_mapper.offsets[local_rank] == 0`` by NVSHMEM
             convention) are allowed.
           * With ``dense_routing``, ``topk_idx`` MUST also be reachable via
-            the peer mapper and MUST be Int64 (peers read it with 8-byte
-            loads). Otherwise it is read on the local rank only and may use
-            ordinary device memory.
+            the peer mapper and MUST be Int32 or Int64 (peers read it in
+            that width). Otherwise it is read on the local rank only and may
+            use ordinary device memory.
           * ``fc1_weight`` / ``fc1_weight_sf`` / ``fc2_weight`` /
             ``fc2_weight_sf`` are local-only.
           * ``output_activation`` is the 2D (T, hidden) result.  Under
@@ -1063,14 +1063,16 @@ class Sm100MegaMoEKernel(Sm100SwapABSwigluFp4Fc12Kernel):
         contract may be tightened later to have the kernel take
         ownership of the reset.
         """
-        # Dense routing reads peer ``topk_idx`` tables with 8-byte loads
-        # (``dispatch_dense_routing``); any other element width would stride
-        # past the table and silently drop every route.
+        # Dense routing reads peer ``topk_idx`` tables in their element width
+        # (``dispatch_dense_routing``) and widens the ids into Int64 scratch;
+        # only the two integer widths it is written for are accepted.
         if cutlass.const_expr(
-            self.dense_routing and topk_idx.element_type is not Int64
+            self.dense_routing
+            and topk_idx.element_type not in (cutlass.Int32, cutlass.Int64)
         ):
             raise TypeError(
-                f"dense_routing requires Int64 topk_idx, got {topk_idx.element_type}."
+                "dense_routing requires Int32 or Int64 topk_idx, "
+                f"got {topk_idx.element_type}."
             )
         # ``max_active_clusters`` and ``cluster_size`` are both Python ints
         # at trace time, so the product folds to a Python int that flows
