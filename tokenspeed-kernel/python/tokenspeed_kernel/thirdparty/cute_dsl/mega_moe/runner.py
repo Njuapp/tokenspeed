@@ -110,6 +110,19 @@ class MegaMoEWorkspace:
         self.situ_linear_beta = situ_linear_beta
         self.world = dist.get_world_size(group)
         self.device_capability = torch.cuda.get_device_capability()
+        # The small-token kernel policies and default tactics below were
+        # measured on this one shape (Kimi-K3 EP16 on SM100/SM103); every
+        # other shape keeps the established configuration.
+        self.k3_ep16_blackwell = (
+            self.device_capability in ((10, 0), (10, 3))
+            and self.world == 16
+            and num_experts == 896
+            and hidden == 3584
+            and intermediate == 3072
+            and top_k == 16
+            and situ_beta == 4.0
+            and situ_linear_beta == 25.0
+        )
         self.key = (
             torch.cuda.current_device(),
             self.world,
@@ -196,47 +209,21 @@ class MegaMoEWorkspace:
 
     def _make_kernel(self, capacity: int, tactic: tuple):
         tile_n, group_hint, scheduler, token_back, flag_batch = tactic
+        k3_ep16_blackwell = self.k3_ep16_blackwell
         # Use the shared Blackwell implementation for small K3 EP16 capacities.
         fuse_bf16_reduce = (
-            self.device_capability in ((10, 0), (10, 3))
-            and self.world == 16
-            and self.num_experts == 896
-            and self.hidden == 3584
-            and self.intermediate == 3072
-            and self.top_k == 16
-            and self.situ_beta == 4.0
-            and self.situ_linear_beta == 25.0
-            and 4 <= capacity <= 32
-            and token_back == "epi_warps"
+            k3_ep16_blackwell and 4 <= capacity <= 32 and token_back == "epi_warps"
         )
         # More workers help the small standalone BF16 reduction. The fused
         # tail and unmeasured capacities keep the established width.
         bf16_hidden_per_thread = (
             2
-            if self.device_capability in ((10, 0), (10, 3))
-            and self.world == 16
-            and self.num_experts == 896
-            and self.hidden == 3584
-            and self.intermediate == 3072
-            and self.top_k == 16
-            and self.situ_beta == 4.0
-            and self.situ_linear_beta == 25.0
-            and capacity in (1, 2, 64)
-            and not fuse_bf16_reduce
+            if k3_ep16_blackwell and capacity in (1, 2, 64) and not fuse_bf16_reduce
             else 8
         )
         # The collective caller supplies one capacity for all EP ranks.
         dense_routing = (
-            self.device_capability in ((10, 0), (10, 3))
-            and self.world == 16
-            and self.num_experts == 896
-            and self.hidden == 3584
-            and self.intermediate == 3072
-            and self.top_k == 16
-            and self.situ_beta == 4.0
-            and self.situ_linear_beta == 25.0
-            and capacity in (1, 2, 4)
-            and token_back == "epi_warps"
+            k3_ep16_blackwell and capacity in (1, 2, 4) and token_back == "epi_warps"
         )
         return Sm100MegaMoEKernel(
             mma_tiler_mnk=(256, tile_n, 256),
@@ -507,20 +494,7 @@ class MegaMoERunner(TunableRunner):
         if tactic is None or tactic == -1:
             if capacity <= 1024:
                 tactic = (128, 512, "static", "epi_warps", 1)
-                if (
-                    self.workspace.device_capability in ((10, 0), (10, 3))
-                    and (
-                        self.world,
-                        self.num_experts,
-                        self.hidden,
-                        self.intermediate,
-                        self.top_k,
-                        self.situ_beta,
-                        self.situ_linear_beta,
-                    )
-                    == (16, 896, 3584, 3072, 16, 4.0, 25.0)
-                    and capacity <= 64
-                ):
+                if self.workspace.k3_ep16_blackwell and capacity <= 64:
                     # Use the small-capacity regimes found by the full sweep.
                     if capacity == 1:
                         tactic = (64, 512, "static", "epi_warps", 1)

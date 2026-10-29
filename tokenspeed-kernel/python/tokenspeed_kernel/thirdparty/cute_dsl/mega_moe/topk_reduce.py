@@ -375,7 +375,7 @@ class TopkReduce:
                 cute.make_copy_atom(
                     cute.nvgpu.CopyUniversalOp(),
                     out_dtype,
-                    num_bits_per_copy=hidden_per_thread * 16,
+                    num_bits_per_copy=hidden_per_thread * out_dtype.width,
                 ),
                 out,
                 self._mark_alignment(dst, hidden_per_thread * out_dtype.width // 8),
@@ -482,7 +482,9 @@ class TopkReduce:
             out.store(acc.load().to(out_dtype))
             cute.copy(
                 cute.make_copy_atom(
-                    cute.nvgpu.CopyUniversalOp(), out_dtype, num_bits_per_copy=256
+                    cute.nvgpu.CopyUniversalOp(),
+                    out_dtype,
+                    num_bits_per_copy=hidden_per_thread * out_dtype.width,
                 ),
                 out,
                 self._mark_alignment(dst, hidden_per_thread * out_dtype.width // 8),
@@ -587,7 +589,9 @@ class TopkReduce:
             out.store(acc.load().to(out_dtype))
             cute.copy(
                 cute.make_copy_atom(
-                    cute.nvgpu.CopyUniversalOp(), out_dtype, num_bits_per_copy=256
+                    cute.nvgpu.CopyUniversalOp(),
+                    out_dtype,
+                    num_bits_per_copy=hidden_per_thread * out_dtype.width,
                 ),
                 out,
                 self._mark_alignment(dst, hidden_per_thread * out_dtype.width // 8),

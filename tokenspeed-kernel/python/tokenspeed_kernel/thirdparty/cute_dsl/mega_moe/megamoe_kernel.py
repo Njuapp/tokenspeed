@@ -1044,8 +1044,9 @@ class Sm100MegaMoEKernel(Sm100SwapABSwigluFp4Fc12Kernel):
             runs (``peer_rank_ptr_mapper.offsets[local_rank] == 0`` by NVSHMEM
             convention) are allowed.
           * With ``dense_routing``, ``topk_idx`` MUST also be reachable via
-            the peer mapper. Otherwise it is read on the local rank only
-            and may use ordinary device memory.
+            the peer mapper and MUST be Int64 (peers read it with 8-byte
+            loads). Otherwise it is read on the local rank only and may use
+            ordinary device memory.
           * ``fc1_weight`` / ``fc1_weight_sf`` / ``fc2_weight`` /
             ``fc2_weight_sf`` are local-only.
           * ``output_activation`` is the 2D (T, hidden) result.  Under
@@ -1062,6 +1063,15 @@ class Sm100MegaMoEKernel(Sm100SwapABSwigluFp4Fc12Kernel):
         contract may be tightened later to have the kernel take
         ownership of the reset.
         """
+        # Dense routing reads peer ``topk_idx`` tables with 8-byte loads
+        # (``dispatch_dense_routing``); any other element width would stride
+        # past the table and silently drop every route.
+        if cutlass.const_expr(
+            self.dense_routing and topk_idx.element_type is not Int64
+        ):
+            raise TypeError(
+                f"dense_routing requires Int64 topk_idx, got {topk_idx.element_type}."
+            )
         # ``max_active_clusters`` and ``cluster_size`` are both Python ints
         # at trace time, so the product folds to a Python int that flows
         # cleanly to every dispatch primitive's ``num_sms: Constexpr[int]``
@@ -1424,12 +1434,7 @@ class Sm100MegaMoEKernel(Sm100SwapABSwigluFp4Fc12Kernel):
             score = (
                 topk_weights if cutlass.const_expr(not self.apply_topk_in_fc1) else None
             )
-            TopkReduce(
-                self.hidden,
-                self.num_topk,
-                self.combine_format,
-                bf16_hidden_per_thread=self.bf16_hidden_per_thread,
-            )(
+            self.tail_reducer(
                 combine_target,
                 combine_sf,
                 output_activation,
@@ -1496,24 +1501,6 @@ class Sm100MegaMoEKernel(Sm100SwapABSwigluFp4Fc12Kernel):
             warp_idx=warp_idx,
             lane_idx=lane_idx,
             tidx=tidx,
-        )
-
-    @cute.jit
-    def token_comm_hook_tail_reset_shared_counters(
-        self,
-        token_comm_args,
-        *,
-        cta_linear_id,
-        local_warp_idx,
-        lane_idx,
-    ):
-        self.token_comm.tail_reset_counters(
-            token_comm_args,
-            token_comm_args.shared_zero_prefix,
-            cta_linear_id=cta_linear_id,
-            local_warp_idx=local_warp_idx,
-            lane_idx=lane_idx,
-            preserve_grid_sync_counter=False,
         )
 
     @cute.jit

@@ -413,19 +413,34 @@ def test_nvfp4_situ_megamoe(tune, monkeypatch):
                 expected = terms[:, 0].float()
                 for k in range(1, TOP_K):
                     expected.add_(terms[:, k].float())
-                output = torch.empty(3, HIDDEN, device="cuda", dtype=torch.bfloat16)
-                reducer = TopkReduce(
-                    HIDDEN, TOP_K, CombineFormat.parse("bf16"), bf16_hidden_per_thread=2
-                )
-                inputs = dict(
-                    combine_quant=cutlass_torch.from_dlpack(terms, assumed_align=16),
-                    combine_sf=None,
-                    reduced_output=cutlass_torch.from_dlpack(output, assumed_align=16),
-                    topk_score=None,
-                    stream=cuda.CUstream(torch.cuda.current_stream().cuda_stream),
-                )
-                cute.compile(reducer, **inputs)(**inputs)
-                torch.testing.assert_close(output, expected.bfloat16(), atol=0, rtol=0)
+                # Every worker width must store its whole slice for both
+                # output widths the reducer can be asked for.
+                for hidden_per_thread in (2, 8):
+                    for out_dtype in (torch.bfloat16, torch.float32):
+                        output = torch.empty(3, HIDDEN, device="cuda", dtype=out_dtype)
+                        reducer = TopkReduce(
+                            HIDDEN,
+                            TOP_K,
+                            CombineFormat.parse("bf16"),
+                            bf16_hidden_per_thread=hidden_per_thread,
+                        )
+                        inputs = dict(
+                            combine_quant=cutlass_torch.from_dlpack(
+                                terms, assumed_align=16
+                            ),
+                            combine_sf=None,
+                            reduced_output=cutlass_torch.from_dlpack(
+                                output, assumed_align=16
+                            ),
+                            topk_score=None,
+                            stream=cuda.CUstream(
+                                torch.cuda.current_stream().cuda_stream
+                            ),
+                        )
+                        cute.compile(reducer, **inputs)(**inputs)
+                        torch.testing.assert_close(
+                            output, expected.to(out_dtype), atol=0, rtol=0
+                        )
         finally:
             set_autotune_process_group(None)
             dist.destroy_process_group()
