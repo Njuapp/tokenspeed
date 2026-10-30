@@ -230,10 +230,16 @@ class Sm100MegaMoEKernel(Sm100SwapABSwigluFp4Fc12Kernel):
             raise ValueError(
                 "dense_routing requires K3 EP16 capacity 1/2/4 BF16 epi_warps"
             )
-        if not isinstance(
-            bf16_hidden_per_thread, int
-        ) or bf16_hidden_per_thread not in (2, 4, 8):
-            raise ValueError("bf16_hidden_per_thread must be 2, 4, or 8")
+        # Checked here as well because in_kernel_fc2_reduce kernels build no
+        # TopkReduce; the option list lives with the reducer.
+        if (
+            not isinstance(bf16_hidden_per_thread, int)
+            or bf16_hidden_per_thread not in TopkReduce.bf16_hidden_per_thread_options
+        ):
+            raise ValueError(
+                "bf16_hidden_per_thread must be one of "
+                f"{TopkReduce.bf16_hidden_per_thread_options}, got {bf16_hidden_per_thread}"
+            )
         if fuse_bf16_reduce and (combine_format.is_quantized or in_kernel_fc2_reduce):
             raise ValueError(
                 "fuse_bf16_reduce requires bf16 combine and "

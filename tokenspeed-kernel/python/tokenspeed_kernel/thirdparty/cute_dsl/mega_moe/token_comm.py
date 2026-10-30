@@ -842,113 +842,72 @@ class TokenInPullTokenBackPush:
                 table_words + self.num_dispatch_threads - 1
             ) // self.num_dispatch_threads
             words = cute.make_rmem_tensor((words_per_thread,), Int64)
-            # Keep the loaded words live per thread. Group 0 keeps the v1
-            # mapping for rows 0/1. Small capacities skip group 1 entirely;
-            # its stale rows are never read. Each group loads before it stores.
-            if cutlass.const_expr(token_comm_args.routing_id_scratch.shape[1] == 2):
-                for i in cutlass.range_constexpr(words_per_thread):
-                    words[i] = Int64(-1)
-                    word = tid_in_group + Int32(i * self.num_dispatch_threads)
-                    if word < Int32(table_words):
-                        entry = word * Int32(ids_per_word)
-                        src_rank = entry // Int32(2 * self.num_topk)
-                        src_token = (entry // Int32(self.num_topk)) % Int32(2)
-                        src_topk = entry % Int32(self.num_topk)
-                        if src_token < num_tokens:
-                            # Peers share this rank's (T, num_topk) layout:
-                            # honor its row stride instead of assuming packed rows.
-                            source_word = src_token * row_stride + src_topk
-                            peer_addr = token_comm_args.peer_rank_ptr_mapper.map(
-                                token_comm_args.topk_idx.iterator.toint(),
-                                src_rank,
-                                Int64(source_word) * Int64(idx_bytes),
-                            )
-                            words[i] = cute.arch.load(
-                                cute.make_ptr(
-                                    Int64, peer_addr, AddressSpace.gmem, assumed_align=8
-                                ),
-                                Int64,
-                                sem="relaxed",
-                                scope="sys",
-                            )
-                for i in cutlass.range_constexpr(words_per_thread):
-                    word = tid_in_group + Int32(i * self.num_dispatch_threads)
-                    if word < Int32(table_words):
-                        entry = word * Int32(ids_per_word)
-                        src_rank = entry // Int32(2 * self.num_topk)
-                        src_token = (entry // Int32(self.num_topk)) % Int32(2)
-                        src_topk = entry % Int32(self.num_topk)
-                        for k in cutlass.range_constexpr(ids_per_word):
-                            if cutlass.const_expr(ids_per_word == 1):
-                                token_comm_args.routing_id_scratch[
-                                    src_rank, src_token, src_topk
-                                ] = words[i]
-                            else:
-                                # Little-endian: id k sits in bits [32k, 32k+32).
-                                # Shift left then arithmetic right to sign-extend.
-                                token_comm_args.routing_id_scratch[
-                                    src_rank, src_token, src_topk + Int32(k)
-                                ] = (
-                                    words[i] << Int64(32 * (ids_per_word - 1 - k))
-                                ) >> Int64(
-                                    32 * (ids_per_word - 1)
+            # The scratch table holds two source tokens per group: one group
+            # for capacities 1 and 2, two for capacity 4. Each group loads
+            # every peer's ids for its two tokens into registers, then unpacks
+            # them into the scratch rows. A group whose tokens are absent is
+            # skipped; its stale rows are never read.
+            num_groups: cutlass.Constexpr[int] = (
+                token_comm_args.routing_id_scratch.shape[1] // 2
+            )
+            for group in cutlass.range_constexpr(num_groups):
+                if num_tokens > Int32(group * 2):
+                    for i in cutlass.range_constexpr(words_per_thread):
+                        words[i] = Int64(-1)
+                        word = tid_in_group + Int32(i * self.num_dispatch_threads)
+                        if word < Int32(table_words):
+                            entry = word * Int32(ids_per_word)
+                            src_rank = entry // Int32(2 * self.num_topk)
+                            src_token = (entry // Int32(self.num_topk)) % Int32(
+                                2
+                            ) + Int32(group * 2)
+                            src_topk = entry % Int32(self.num_topk)
+                            if src_token < num_tokens:
+                                # Peers share this rank's (T, num_topk) layout:
+                                # honor its row stride instead of assuming
+                                # packed rows.
+                                source_word = src_token * row_stride + src_topk
+                                peer_addr = token_comm_args.peer_rank_ptr_mapper.map(
+                                    token_comm_args.topk_idx.iterator.toint(),
+                                    src_rank,
+                                    Int64(source_word) * Int64(idx_bytes),
                                 )
-            else:
-                for group in cutlass.range_constexpr(2):
-                    if num_tokens > Int32(group * 2):
-                        for i in cutlass.range_constexpr(words_per_thread):
-                            words[i] = Int64(-1)
-                            word = tid_in_group + Int32(i * self.num_dispatch_threads)
-                            if word < Int32(table_words):
-                                entry = word * Int32(ids_per_word)
-                                src_rank = entry // Int32(2 * self.num_topk)
-                                src_token = (entry // Int32(self.num_topk)) % Int32(
-                                    2
-                                ) + Int32(group * 2)
-                                src_topk = entry % Int32(self.num_topk)
-                                if src_token < num_tokens:
-                                    source_word = src_token * row_stride + src_topk
-                                    peer_addr = (
-                                        token_comm_args.peer_rank_ptr_mapper.map(
-                                            token_comm_args.topk_idx.iterator.toint(),
-                                            src_rank,
-                                            Int64(source_word) * Int64(idx_bytes),
-                                        )
-                                    )
-                                    words[i] = cute.arch.load(
-                                        cute.make_ptr(
-                                            Int64,
-                                            peer_addr,
-                                            AddressSpace.gmem,
-                                            assumed_align=8,
-                                        ),
+                                words[i] = cute.arch.load(
+                                    cute.make_ptr(
                                         Int64,
-                                        sem="relaxed",
-                                        scope="sys",
+                                        peer_addr,
+                                        AddressSpace.gmem,
+                                        assumed_align=8,
+                                    ),
+                                    Int64,
+                                    sem="relaxed",
+                                    scope="sys",
+                                )
+                    for i in cutlass.range_constexpr(words_per_thread):
+                        word = tid_in_group + Int32(i * self.num_dispatch_threads)
+                        if word < Int32(table_words):
+                            entry = word * Int32(ids_per_word)
+                            src_rank = entry // Int32(2 * self.num_topk)
+                            src_token = (entry // Int32(self.num_topk)) % Int32(
+                                2
+                            ) + Int32(group * 2)
+                            src_topk = entry % Int32(self.num_topk)
+                            for k in cutlass.range_constexpr(ids_per_word):
+                                if cutlass.const_expr(ids_per_word == 1):
+                                    token_comm_args.routing_id_scratch[
+                                        src_rank, src_token, src_topk
+                                    ] = words[i]
+                                else:
+                                    # Little-endian: id k sits in bits
+                                    # [32k, 32k+32). Shift left then arithmetic
+                                    # right to sign-extend.
+                                    token_comm_args.routing_id_scratch[
+                                        src_rank, src_token, src_topk + Int32(k)
+                                    ] = (
+                                        words[i] << Int64(32 * (ids_per_word - 1 - k))
+                                    ) >> Int64(
+                                        32 * (ids_per_word - 1)
                                     )
-                        for i in cutlass.range_constexpr(words_per_thread):
-                            word = tid_in_group + Int32(i * self.num_dispatch_threads)
-                            if word < Int32(table_words):
-                                entry = word * Int32(ids_per_word)
-                                src_rank = entry // Int32(2 * self.num_topk)
-                                src_token = (entry // Int32(self.num_topk)) % Int32(
-                                    2
-                                ) + Int32(group * 2)
-                                src_topk = entry % Int32(self.num_topk)
-                                for k in cutlass.range_constexpr(ids_per_word):
-                                    if cutlass.const_expr(ids_per_word == 1):
-                                        token_comm_args.routing_id_scratch[
-                                            src_rank, src_token, src_topk
-                                        ] = words[i]
-                                    else:
-                                        token_comm_args.routing_id_scratch[
-                                            src_rank, src_token, src_topk + Int32(k)
-                                        ] = (
-                                            words[i]
-                                            << Int64(32 * (ids_per_word - 1 - k))
-                                        ) >> Int64(
-                                            32 * (ids_per_word - 1)
-                                        )
 
         software_grid_sync(
             token_comm_args.grid_sync_counter,

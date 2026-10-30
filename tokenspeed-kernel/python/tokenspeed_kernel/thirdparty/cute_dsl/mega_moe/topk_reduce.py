@@ -100,6 +100,8 @@ class TopkReduce:
     """
 
     _threads: ClassVar[int] = 128
+    # Hidden elements per worker the BF16 reducer can be built with.
+    bf16_hidden_per_thread_options: ClassVar[tuple[int, ...]] = (2, 4, 8)
     # Quantized payload widths stay within one scale block per worker.
     # BF16 uses the explicit constructor argument instead.
     _quantized_hidden_per_thread: ClassVar[Dict[str, int]] = {
@@ -122,10 +124,14 @@ class TopkReduce:
         self.num_topk = int(num_topk)
         self.combine_format = combine_format
         self.bf16_hidden_per_thread = bf16_hidden_per_thread
-        if not isinstance(
-            bf16_hidden_per_thread, int
-        ) or bf16_hidden_per_thread not in (2, 4, 8):
-            raise ValueError("bf16_hidden_per_thread must be 2, 4, or 8")
+        if (
+            not isinstance(bf16_hidden_per_thread, int)
+            or bf16_hidden_per_thread not in self.bf16_hidden_per_thread_options
+        ):
+            raise ValueError(
+                "bf16_hidden_per_thread must be one of "
+                f"{self.bf16_hidden_per_thread_options}, got {bf16_hidden_per_thread}"
+            )
         self.hidden_per_thread = (
             self._quantized_hidden_per_thread[combine_format.name]
             if combine_format.is_quantized
