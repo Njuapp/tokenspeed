@@ -833,6 +833,10 @@ class TokenInPullTokenBackPush:
             # enables dense routing for num_topk == 16 (a raise is not allowed
             # inside this staged dispatch body).
             ids_per_word: cutlass.Constexpr[int] = 8 // idx_bytes
+            # Row stride of the (T, num_topk) id table in elements. The kernel
+            # entry requires a unit column stride; rows may be padded as long
+            # as each row start stays 8-byte aligned.
+            row_stride = Int32(token_comm_args.topk_idx.stride[0])
             table_words: cutlass.Constexpr[int] = table_entries // ids_per_word
             words_per_thread: cutlass.Constexpr[int] = (
                 table_words + self.num_dispatch_threads - 1
@@ -851,7 +855,9 @@ class TokenInPullTokenBackPush:
                         src_token = (entry // Int32(self.num_topk)) % Int32(2)
                         src_topk = entry % Int32(self.num_topk)
                         if src_token < num_tokens:
-                            source_word = src_token * Int32(self.num_topk) + src_topk
+                            # Peers share this rank's (T, num_topk) layout:
+                            # honor its row stride instead of assuming packed rows.
+                            source_word = src_token * row_stride + src_topk
                             peer_addr = token_comm_args.peer_rank_ptr_mapper.map(
                                 token_comm_args.topk_idx.iterator.toint(),
                                 src_rank,
@@ -901,9 +907,7 @@ class TokenInPullTokenBackPush:
                                 ) + Int32(group * 2)
                                 src_topk = entry % Int32(self.num_topk)
                                 if src_token < num_tokens:
-                                    source_word = (
-                                        src_token * Int32(self.num_topk) + src_topk
-                                    )
+                                    source_word = src_token * row_stride + src_topk
                                     peer_addr = (
                                         token_comm_args.peer_rank_ptr_mapper.map(
                                             token_comm_args.topk_idx.iterator.toint(),

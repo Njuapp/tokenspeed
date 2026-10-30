@@ -441,6 +441,35 @@ def test_nvfp4_situ_megamoe(tune, monkeypatch):
                         torch.testing.assert_close(
                             output, expected.to(out_dtype), atol=0, rtol=0
                         )
+                # mxfp8 reducer: small integers are exact in e4m3, and a unit
+                # e8m0 scale (byte 127) keeps the sum exact.
+                codes = torch.randint(-4, 5, (3, TOP_K, HIDDEN), device="cuda")
+                expected = codes.sum(dim=1).float()
+                combine_quant = codes.to(torch.float8_e4m3fn)
+                combine_sf = torch.full(
+                    (3, TOP_K, HIDDEN // 32), 127, device="cuda", dtype=torch.uint8
+                ).view(torch.float8_e8m0fnu)
+                # The runner always reduces into bf16 (see MegaMoERunner.output).
+                output = torch.empty(3, HIDDEN, device="cuda", dtype=torch.bfloat16)
+                reducer = TopkReduce(
+                    HIDDEN,
+                    TOP_K,
+                    CombineFormat.parse("32e4m3xe8m0"),
+                    bf16_hidden_per_thread=8,
+                )
+                inputs = dict(
+                    combine_quant=cutlass_torch.from_dlpack(
+                        combine_quant, assumed_align=16
+                    ),
+                    combine_sf=cutlass_torch.from_dlpack(combine_sf, assumed_align=16),
+                    reduced_output=cutlass_torch.from_dlpack(output, assumed_align=16),
+                    topk_score=None,
+                    stream=cuda.CUstream(torch.cuda.current_stream().cuda_stream),
+                )
+                cute.compile(reducer, **inputs)(**inputs)
+                torch.testing.assert_close(
+                    output, expected.to(torch.bfloat16), atol=0, rtol=0
+                )
         finally:
             set_autotune_process_group(None)
             dist.destroy_process_group()

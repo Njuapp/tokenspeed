@@ -343,12 +343,17 @@ class Sm100MegaMoEKernel(Sm100SwapABSwigluFp4Fc12Kernel):
         self.num_topk = num_topk
         self.max_tokens_per_rank = max_tokens_per_rank
         self.hidden = hidden
-        self.tail_reducer = TopkReduce(
-            self.hidden,
-            self.num_topk,
-            self.combine_format,
-            bf16_hidden_per_thread=self.bf16_hidden_per_thread,
-        )
+        # The tail reducer serves both the standalone and the fused tail
+        # reduce; the in-kernel FC2 reduce never reduces, so it must not
+        # inherit the reducer's hidden-divisibility constraints.
+        self.tail_reducer: Optional[TopkReduce] = None
+        if not in_kernel_fc2_reduce:
+            self.tail_reducer = TopkReduce(
+                self.hidden,
+                self.num_topk,
+                self.combine_format,
+                bf16_hidden_per_thread=self.bf16_hidden_per_thread,
+            )
         self.flag_batch = flag_batch  # stored so name() can encode it
 
         # static_expert_shape = (num_experts_per_rank, intermediate_gateup, hidden).
@@ -1045,8 +1050,10 @@ class Sm100MegaMoEKernel(Sm100SwapABSwigluFp4Fc12Kernel):
             convention) are allowed.
           * With ``dense_routing``, ``topk_idx`` MUST also be reachable via
             the peer mapper and MUST be Int32 or Int64 (peers read it in
-            that width). Otherwise it is read on the local rank only and may
-            use ordinary device memory.
+            that width), with a unit column stride; its row stride is honored
+            and every row start MUST be 8-byte aligned (peers fetch 8-byte
+            words). Otherwise it is read on the local rank only and may use
+            ordinary device memory.
           * ``fc1_weight`` / ``fc1_weight_sf`` / ``fc2_weight`` /
             ``fc2_weight_sf`` are local-only.
           * ``output_activation`` is the 2D (T, hidden) result.  Under
@@ -1073,6 +1080,13 @@ class Sm100MegaMoEKernel(Sm100SwapABSwigluFp4Fc12Kernel):
             raise TypeError(
                 "dense_routing requires Int32 or Int64 topk_idx, "
                 f"got {topk_idx.element_type}."
+            )
+        # Peers fetch two adjacent ids per 8-byte word, so columns must be
+        # contiguous; the row stride itself is read from the layout.
+        if cutlass.const_expr(self.dense_routing and topk_idx.stride[1] != 1):
+            raise TypeError(
+                "dense_routing requires a unit column stride for topk_idx, "
+                f"got stride {topk_idx.stride}."
             )
         # ``max_active_clusters`` and ``cluster_size`` are both Python ints
         # at trace time, so the product folds to a Python int that flows
