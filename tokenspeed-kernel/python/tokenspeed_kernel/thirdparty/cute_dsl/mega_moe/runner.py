@@ -210,22 +210,24 @@ class MegaMoEWorkspace:
 
     def _make_kernel(self, capacity: int, tactic: tuple):
         tile_n, group_hint, scheduler, token_back, flag_batch = tactic
-        k3_ep16_blackwell = self.k3_ep16_blackwell
-        # Use the shared Blackwell implementation for small K3 EP16 capacities.
+        # The small-token policies below were swept up to 64 tokens per rank
+        # on the K3 EP16 shape; larger capacities keep the established
+        # configuration.
+        small_token = self.k3_ep16_blackwell and capacity <= 64
+        # Reduce the top-k terms in the kernel tail where a second launch
+        # costs more than the reduction itself. Below this band the dispatch
+        # warps are too few workers; above it a dedicated grid is faster.
         fuse_bf16_reduce = (
-            k3_ep16_blackwell and 4 <= capacity <= 32 and token_back == "epi_warps"
+            small_token and 4 <= capacity <= 32 and token_back == "epi_warps"
         )
-        # More workers help the small standalone BF16 reduction. The fused
-        # tail and unmeasured capacities keep the established width.
-        bf16_hidden_per_thread = (
-            2
-            if k3_ep16_blackwell and capacity in (1, 2, 64) and not fuse_bf16_reduce
-            else 8
-        )
-        # The collective caller supplies one capacity for all EP ranks.
-        dense_routing = (
-            k3_ep16_blackwell and capacity in (1, 2, 4) and token_back == "epi_warps"
-        )
+        # Whenever the standalone reducer runs for a small batch, give each
+        # worker fewer hidden elements so the reduction spreads over more
+        # threads. The fused tail does not use the standalone reducer.
+        bf16_hidden_per_thread = 2 if small_token and not fuse_bf16_reduce else 8
+        # With at most a few tokens per rank, dispatch scans every peer's
+        # top-k id table directly instead of the counter protocol. The
+        # collective caller supplies one capacity for all EP ranks.
+        dense_routing = small_token and capacity <= 4 and token_back == "epi_warps"
         return Sm100MegaMoEKernel(
             mma_tiler_mnk=(256, tile_n, 256),
             cluster_shape_mnk=(2, 1, 1),
