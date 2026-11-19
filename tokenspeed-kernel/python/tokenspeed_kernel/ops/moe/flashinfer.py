@@ -4255,6 +4255,94 @@ if platform.is_nvidia:
         )
 
 
+# ===-----------------------------------------------------------------------===#
+# MXFP4 MegaMoE: DeepSeek V4.1 (NVIDIA SM120)
+# ===-----------------------------------------------------------------------===#
+
+
+# FlashInfer's hybrid-transport MegaMoE: the EP ranks exchange rows over NCCL
+# windows (PCIe load/store or GPU-initiated networking), so the EP group may
+# span hosts without NVLink. See ops/moe/README.md.
+
+
+def _sm120_mega_moe_available() -> bool:
+    if not (platform.is_nvidia and platform.arch_version == ArchVersion(12, 0)):
+        return False
+    from tokenspeed_kernel.thirdparty.flashinfer import mega_moe_sm120
+
+    return mega_moe_sm120.available()
+
+
+if _sm120_mega_moe_available():
+    from tokenspeed_kernel.ops.moe._flashinfer.mega_moe import (
+        flashinfer_mxfp4_mega_moe_process_weights,
+        flashinfer_mxfp4_mega_moe_run,
+        fuse_flashinfer_mxfp4_mega_moe_shared_expert,
+        warmup_flashinfer_mxfp4_mega_moe,
+    )
+
+    @register_kernel(
+        "moe",
+        "apply",
+        name="flashinfer_mxfp4_mega_moe_apply",
+        solution="mega_moe",
+        capability=CapabilityRequirement(
+            vendors=frozenset({"nvidia"}),
+            min_arch_version=ArchVersion(12, 0),
+            max_arch_version=ArchVersion(12, 0),
+            required_features=frozenset({"tensor_core:f4"}),
+        ),
+        signatures=format_signatures(
+            "x",
+            "dense",
+            {torch.bfloat16},
+        ),
+        traits={
+            "weight_dtype": frozenset({"mxfp4"}),
+            "activation": frozenset({"swiglu"}),
+            "routing_mode": frozenset({"precomputed_topk"}),
+            "supports_deferred_finalize": frozenset({False}),
+            "supports_ep": frozenset({True}),
+            "supports_all_to_all_ep": frozenset({False}),
+            "persistent_workspace": frozenset({True}),
+            "ispp_alignment": frozenset({128}),
+            "hidden_alignment": frozenset({512}),
+            "swiglu_form": frozenset({"standard"}),
+            "activation_clamped": frozenset({False, True}),
+            "internal_activation_dtype": frozenset({"input"}),
+            "supports_bias": frozenset({False}),
+        },
+        priority=Priority.SPECIALIZED,
+        weight_preprocessor=flashinfer_mxfp4_mega_moe_process_weights,
+    )
+    def flashinfer_mxfp4_mega_moe_apply(
+        plan: dict,
+        x: torch.Tensor,
+        w: torch.nn.Module,
+        router_logits: torch.Tensor | None,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        num_tokens_global: int | None,
+        max_num_tokens_per_gpu: int | None,
+        do_finalize: bool,
+        enable_pdl: bool,
+    ) -> torch.Tensor:
+        if not do_finalize:
+            raise ValueError("FlashInfer MegaMoE requires complete finalization")
+        if not isinstance(x, torch.Tensor):
+            raise TypeError("FlashInfer MegaMoE requires dense input activations")
+        return flashinfer_mxfp4_mega_moe_run(
+            plan, x, w, topk_weights, topk_ids, max_num_tokens_per_gpu
+        )
+
+    flashinfer_mxfp4_mega_moe_apply._tokenspeed_warmup = (  # type: ignore[attr-defined]
+        warmup_flashinfer_mxfp4_mega_moe
+    )
+    flashinfer_mxfp4_mega_moe_apply._tokenspeed_fuse_shared_expert = (  # type: ignore[attr-defined]
+        fuse_flashinfer_mxfp4_mega_moe_shared_expert
+    )
+
+
 if not platform.is_nvidia:
 
     def prepare_nvfp4_routing(

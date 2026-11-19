@@ -209,14 +209,21 @@ if gemm_fp8_nt_groupwise is not error_fn:
 
 
 # ===-----------------------------------------------------------------------===#
-# MXFP8 (1x32 UE8M0): FlashInfer CuTe DSL (NVIDIA SM100)
+# MXFP8 (1x32 UE8M0): FlashInfer CuTe DSL (NVIDIA SM10x and SM120)
 # ===-----------------------------------------------------------------------===#
 
 
 mm_mxfp8 = error_fn
+_sm120_mxfp8 = platform.is_nvidia and platform.arch_version == ArchVersion(12, 0)
+_mxfp8_k_alignment = 128 if _sm120_mxfp8 else 32
 
 if platform.is_nvidia and platform.is_blackwell:
     from tokenspeed_kernel.thirdparty.flashinfer.mxfp8 import mm_mxfp8
+elif _sm120_mxfp8:
+    from tokenspeed_kernel.thirdparty.flashinfer.mxfp8 import has_sm120_mxfp8
+
+    if has_sm120_mxfp8():
+        from tokenspeed_kernel.thirdparty.flashinfer.mxfp8 import mm_mxfp8
 
 _MXFP8_UE8M0_1X32_SCALE = ScaleFormat(
     storage_dtype=torch.uint8,
@@ -234,17 +241,36 @@ _MXFP8_1X32_FORMAT_SIGNATURES = frozenset(
         b=tensor_format("mxfp8", _fp8_dtype, scale=_MXFP8_UE8M0_1X32_SCALE),
     )
     for a_scale in (_MXFP8_FLOAT_1X32_SCALE, _MXFP8_UE8M0_1X32_SCALE)
+    if not _sm120_mxfp8 or a_scale == _MXFP8_UE8M0_1X32_SCALE
 )
 
 
 def has_flashinfer_mxfp8() -> bool:
-    """Whether the flashinfer cute-dsl MXFP8 (1,32) GEMM is usable here.
+    """Whether a native FlashInfer MXFP8 (1,32) GEMM is usable here.
 
     Returns:
-        True when running on an NVIDIA Blackwell (SM10x) GPU with a
-        flashinfer build that provides ``mm_mxfp8``.
+        True on SM10x with FlashInfer's CuTe DSL backend, or on SM120 with
+        its b12x backend, CUDA 13+, and CUTLASS DSL 4.6+.
     """
     return mm_mxfp8 is not error_fn
+
+
+def flashinfer_mxfp8_supports_weight(weight: torch.Tensor) -> bool:
+    """Whether native MXFP8 can read an E4M3 weight in ``[N, K]`` layout.
+
+    SM120 needs complete 128-element K tiles and aligned, contiguous weights.
+    Other shapes retain their canonical scales and use the compatible GEMM.
+    """
+    return (
+        has_flashinfer_mxfp8()
+        and weight.is_cuda
+        and min(weight.shape) >= 128
+        and weight.shape[1] % _mxfp8_k_alignment == 0
+        and weight.stride(-1) == 1
+        and (
+            not _sm120_mxfp8 or (weight.is_contiguous() and weight.data_ptr() % 32 == 0)
+        )
+    )
 
 
 def swizzle_mxfp8_scale(sf: torch.Tensor, m: int, k: int) -> torch.Tensor:
@@ -263,16 +289,26 @@ if mm_mxfp8 is not error_fn:
         name="flashinfer_mm_mxfp8",
         solution="flashinfer",
         capability=CapabilityRequirement(
-            min_arch_version=ArchVersion(10, 0),
-            max_arch_version=ArchVersion(10, 7),
+            min_arch_version=ArchVersion(12, 0) if _sm120_mxfp8 else ArchVersion(10, 0),
+            max_arch_version=ArchVersion(12, 0) if _sm120_mxfp8 else ArchVersion(10, 7),
             vendors=frozenset({"nvidia"}),
         ),
         signatures=_MXFP8_1X32_FORMAT_SIGNATURES,
         traits={
-            "k_align": frozenset({32}),
+            "k_align": frozenset({_mxfp8_k_alignment}),
             "n_min": frozenset({128}),
             "k_min": frozenset({128}),
             "pdl_enabled": frozenset({True}),
+            **(
+                {
+                    "a_contiguous": frozenset({True}),
+                    "b_contiguous": frozenset({True}),
+                    "out_dtype": frozenset({torch.bfloat16, torch.float16}),
+                    "has_alpha": frozenset({False}),
+                }
+                if _sm120_mxfp8
+                else {}
+            ),
         },
         priority=Priority.SPECIALIZED + 2,
     )
@@ -287,7 +323,7 @@ if mm_mxfp8 is not error_fn:
         block_size: list[int] | None = None,
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """MXFP8 (1,32)-block ue8m0 GEMM via flashinfer's cute-dsl backend.
+        """MXFP8 (1,32)-block UE8M0 GEMM via the architecture's native backend.
 
         Args:
             A: ``[M, K]`` float8_e4m3fn activations.
@@ -298,7 +334,7 @@ if mm_mxfp8 is not error_fn:
             B_scales: uint8 e8m0 weight scales, same layout options with
                 ``[N, K // 32]`` row-major.
             out_dtype: Output dtype (bf16/fp16).
-            alpha: Unused.
+            alpha: Must be None; the block scales carry the dequantization.
             block_size: Must be ``[1, 32]``.
             out: Optional output buffer.
 
@@ -310,6 +346,8 @@ if mm_mxfp8 is not error_fn:
         ), "A_scales is required; online quantization should be done by the caller"
         assert B_scales is not None, "B_scales is required for MXFP8 GEMM"
         assert block_size == [1, 32], f"expected block_size [1, 32], got {block_size}"
+        if alpha is not None:
+            raise ValueError("flashinfer_mm_mxfp8 takes no alpha")
         k = A.shape[1]
         # B follows the dispatch convention of a [N, K] weight (row-major,
         # like the Triton kernel assumes); mm_mxfp8 wants the [K, N]
@@ -320,9 +358,9 @@ if mm_mxfp8 is not error_fn:
         else:
             b = B.t()
         n = b.shape[1]
-        if k < 128 or k % 32 != 0 or n < 128:
+        if k < 128 or k % _mxfp8_k_alignment != 0 or n < 128:
             raise ValueError(
-                f"flashinfer_mm_mxfp8 requires K >= 128, K % 32 == 0 and "
+                f"flashinfer_mm_mxfp8 requires K >= 128, K % {_mxfp8_k_alignment} == 0 and "
                 f"N >= 128, got K={k}, N={n}"
             )
         if A_scales.dtype != torch.uint8 or B_scales.dtype != torch.uint8:
@@ -334,15 +372,50 @@ if mm_mxfp8 is not error_fn:
             A_scales = swizzle_mxfp8_scale(A_scales.contiguous(), A.shape[0], k)
         if B_scales.dim() != 1:
             B_scales = swizzle_mxfp8_scale(B_scales.contiguous(), n, k)
-        output = mm_mxfp8(
-            A,
-            b,
-            A_scales,
-            B_scales,
-            out_dtype=out_dtype,
-            backend="cute-dsl",
+        if _sm120_mxfp8:
+            # The compiled b12x operand views assume 32-byte alignment.
+            # Online quantization already supplies aligned contiguous A.
+            if not A.is_contiguous() or A.data_ptr() % 32:
+                A = A.clone(memory_format=torch.contiguous_format)
+            if not b.t().is_contiguous() or b.data_ptr() % 32:
+                b = b.t().clone(memory_format=torch.contiguous_format).t()
+        direct_out = (
+            _sm120_mxfp8
+            and out is not None
+            and out.is_contiguous()
+            and out.data_ptr() % 16 == 0
         )
-        if out is not None:
+        if (
+            _sm120_mxfp8
+            and 1 <= A.shape[0] <= 16
+            and k == 5120
+            and n in (576, 1792)
+            and out_dtype == torch.bfloat16
+        ):
+            from tokenspeed_kernel.thirdparty.flashinfer.mxfp8_sm120 import (
+                mm_mxfp8_split_k,
+            )
+
+            output = mm_mxfp8_split_k(
+                A,
+                b.t(),
+                A_scales,
+                B_scales,
+                out=out if direct_out else None,
+                enable_pdl=pdl_enabled(),
+            )
+        else:
+            output = mm_mxfp8(
+                A,
+                b,
+                A_scales,
+                B_scales,
+                out=out if direct_out else None,
+                out_dtype=out_dtype,
+                use_8x4_sf_layout=False,
+                backend="b12x" if _sm120_mxfp8 else "cute-dsl",
+            )
+        if out is not None and not direct_out:
             out.copy_(output)
             return out
         return output

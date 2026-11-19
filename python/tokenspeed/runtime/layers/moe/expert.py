@@ -525,6 +525,7 @@ class MoELayer(torch.nn.Module):
                 deepep_low_latency_max_num_tokens_per_gpu
             ),
             persistent_max_num_tokens_per_gpu=persistent_max_num_tokens_per_gpu,
+            mega_moe_transport=global_server_args_dict["mega_moe_transport"],
             features=(
                 frozenset({"batch_invariant"})
                 if global_server_args_dict["numerics"] in BITWISE_ENVELOPES

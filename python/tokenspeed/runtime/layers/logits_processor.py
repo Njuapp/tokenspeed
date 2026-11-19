@@ -483,9 +483,13 @@ class LogitsProcessor(nn.Module):
         from tokenspeed_kernel.ops.communication.fabric import (
             group_has_fabric,
         )
+        from tokenspeed_kernel.ops.communication.multimem import multimem_available
 
         from tokenspeed.runtime.utils.env import global_server_args_dict
 
+        # Node-local IPC does not provide multicast on PCIe-only devices.
+        if not multimem_available():
+            return False
         mapping = global_server_args_dict.get("mapping")
         nprocs_per_node = getattr(mapping, "nprocs_per_node", None)
         spans_hosts = bool(nprocs_per_node) and (

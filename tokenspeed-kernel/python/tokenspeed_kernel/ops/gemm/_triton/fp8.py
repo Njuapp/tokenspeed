@@ -28,7 +28,7 @@ from typing import List, Optional
 
 import torch
 from tokenspeed_kernel._triton import tl, triton
-from tokenspeed_kernel.platform import Platform
+from tokenspeed_kernel.platform import ArchVersion, Platform
 
 
 def prepare_block_fp8_matmul_inputs(
@@ -163,8 +163,27 @@ def get_w8a8_block_fp8_config(
 
     Returns:
         An immutable mapping of Triton launch parameters when the shape is
-        covered by the gfx950 sweep, otherwise ``None``.
+        covered by a measured policy, otherwise ``None``.
     """
+    platform = Platform.get()
+    if (
+        platform.is_nvidia
+        and platform.arch_version == ArchVersion(12, 0)
+        and 1 <= M <= 16
+        and (N, K, block_n, block_k) == (5120, 288, 1, 32)
+    ):
+        # The K=288 shared-expert projection cannot use the K-aligned native
+        # MXFP8 kernel. A 16-row tile avoids the portable 64-row padding here.
+        return MappingProxyType(
+            {
+                "BLOCK_SIZE_M": 16,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 1,
+                "num_warps": 4,
+                "num_stages": 3,
+            }
+        )
     if not Platform.get().is_cdna4:
         return None
     return _get_gfx950_w8a8_block_fp8_config(M, N, K, block_n, block_k)

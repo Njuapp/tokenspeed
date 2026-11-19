@@ -1829,6 +1829,9 @@ def _mhc_mixes_impl(
     splits = compute_mhc_num_splits(
         residual.device, 64, 4 * hidden, max(1, triton.cdiv(tokens, 64))
     )
+    # The legacy coefficient reducer indexes its partial buffer in int32.
+    if splits * tokens * 24 >= 1 << 31:
+        raise ValueError("mHC partial buffer exceeds the reducer's int32 index bound")
     projection = torch.empty(
         (splits, tokens, 24), device=residual.device, dtype=torch.float32
     )
@@ -1883,6 +1886,197 @@ def triton_mhc_mixes(residual, weight, scale, base, rms_eps, hc_eps, sinkhorn_it
         _mhc_prenorm_gemm_triton,
         mhc_pre_mix_hc4,
     )
+
+
+@triton.jit(do_not_specialize=["num_tokens"])
+def _mhc_prenorm_vector_sm120_kernel(
+    residual,
+    weight,
+    projection,
+    square_sum,
+    num_tokens,
+    K: tl.constexpr,
+    SPAN: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    token = tl.program_id(0).to(tl.int64)
+    row = tl.program_id(1)
+    part = tl.program_id(2)
+    lane = tl.arange(0, BLOCK)
+    k = part * SPAN + lane
+    valid = (k < K) & (lane < SPAN)
+    x = tl.load(residual + token * K + k, valid, 0).to(tl.float32)
+    w = tl.load(weight + row * K + k, valid, 0)
+    partial_row = part.to(tl.int64) * num_tokens + token
+    tl.store(projection + partial_row * 24 + row, tl.sum(x * w, 0))
+    if row == 0:
+        tl.store(square_sum + partial_row, tl.sum(x * x, 0))
+
+
+@triton.jit(do_not_specialize=["num_tokens", "SPLIT_K"])
+def _mhc_prenorm_tensor_sm120_kernel(
+    x,
+    fn,
+    out_mul,
+    out_sqrsum,
+    num_tokens,
+    K: tl.constexpr,
+    N: tl.constexpr,
+    # Derived from the per-batch split count; runtime so every batch shape
+    # shares one binary.
+    SPLIT_K,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    split_id = tl.program_id(0).to(tl.int64)
+    token_block = tl.program_id(1).to(tl.int64)
+    n_block = tl.program_id(2)
+    offs_m = token_block * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = n_block * BLOCK_N + tl.arange(0, BLOCK_N)
+    split_start = split_id * SPLIT_K
+    dot_acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    square_acc = tl.zeros((BLOCK_M,), dtype=tl.float32)
+
+    for k_start in range(0, SPLIT_K, BLOCK_K):
+        offs_k = split_start + k_start + tl.arange(0, BLOCK_K)
+        x_values = tl.load(
+            x + offs_m[:, None] * K + offs_k[None, :],
+            mask=(offs_m[:, None] < num_tokens) & (offs_k[None, :] < K),
+            other=0.0,
+        )
+        fn_values = tl.load(
+            fn + offs_k[:, None] + offs_n[None, :] * K,
+            mask=(offs_k[:, None] < K) & (offs_n[None, :] < N),
+            other=0.0,
+        )
+        dot_acc = tl.dot(
+            x_values.to(tl.float32),
+            fn_values,
+            dot_acc,
+            input_precision="tf32x3",
+        )
+        x_fp32 = x_values.to(tl.float32)
+        square_acc += tl.sum(x_fp32 * x_fp32, axis=1)
+
+    tl.store(
+        out_mul + split_id * num_tokens * N + offs_m[:, None] * N + offs_n[None, :],
+        dot_acc,
+        mask=(offs_m[:, None] < num_tokens) & (offs_n[None, :] < N),
+    )
+    tl.store(
+        out_sqrsum + split_id * num_tokens + offs_m,
+        square_acc,
+        mask=(offs_m < num_tokens) & (n_block == 0),
+    )
+
+
+def _mhc_prenorm_tensor_sm120(x, weight, projection, square_sum, splits):
+    tokens, k = x.shape
+    split_k = triton.cdiv(triton.cdiv(k, splits), 64) * 64
+    _mhc_prenorm_tensor_sm120_kernel[(splits, triton.cdiv(tokens, 16), 1)](
+        x,
+        weight,
+        projection,
+        square_sum,
+        tokens,
+        K=k,
+        N=24,
+        SPLIT_K=split_k,
+        BLOCK_M=16,
+        BLOCK_N=32,
+        BLOCK_K=64,
+        num_warps=4,
+        num_stages=1,
+    )
+
+
+@register_kernel(
+    "residual",
+    "mhc_mixes",
+    name="triton_mhc_mixes_sm120",
+    solution="triton",
+    capability=CapabilityRequirement(
+        vendors=frozenset({"nvidia"}),
+        min_arch_version=ArchVersion(12, 0),
+        max_arch_version=ArchVersion(12, 0),
+    ),
+    signatures=frozenset(
+        {format_signature(residual=dense_tensor_format(torch.bfloat16))}
+    ),
+    priority=Priority.PERFORMANT,
+)
+def triton_mhc_mixes_sm120(
+    residual, weight, scale, base, rms_eps, hc_eps, sinkhorn_iters
+):
+    """Produce FP32 pre, post and combination coefficients on SM120.
+
+    Arguments and returned tensors follow ``residual.mhc_mixes``. Small
+    batches with four streams of width 5120 use FP32 vector reductions.
+    Larger batches of the same width use TF32x3 tensor-core products.
+    Other hidden widths use the portable implementation with all arguments intact.
+    """
+    tokens, _, hidden = residual.shape
+    if hidden != 5120 or tokens == 0:
+        return triton_mhc_mixes(
+            residual, weight, scale, base, rms_eps, hc_eps, sinkhorn_iters
+        )
+    if tokens > 16:
+        # BF16 activations remain exact; TF32x3 retains the FP32 weight.
+        return _mhc_mixes_impl(
+            residual,
+            weight,
+            scale,
+            base,
+            rms_eps,
+            hc_eps,
+            sinkhorn_iters,
+            _mhc_prenorm_tensor_sm120,
+            mhc_pre_mix_hc4,
+        )
+    # Three token buckets bound compilation and reduce the serial merge work.
+    splits = 16 if tokens == 1 else 8 if tokens <= 8 else 4
+    warps = 8 if tokens > 8 else 4
+    projection = torch.empty(
+        (splits, tokens, 24), device=residual.device, dtype=torch.float32
+    )
+    square_sum = torch.empty(
+        (splits, tokens), device=residual.device, dtype=torch.float32
+    )
+    pre = torch.empty((tokens, 4), device=residual.device, dtype=torch.float32)
+    post = torch.empty_like(pre)
+    comb = torch.empty((tokens, 4, 4), device=residual.device, dtype=torch.float32)
+    span = triton.cdiv(4 * hidden, splits)
+    _mhc_prenorm_vector_sm120_kernel[(tokens, 24, splits)](
+        residual,
+        weight,
+        projection,
+        square_sum,
+        tokens,
+        K=4 * hidden,
+        SPAN=span,
+        BLOCK=triton.next_power_of_2(span),
+        num_warps=warps,
+        num_stages=1,
+    )
+    # This legacy reducer uses int32 offsets. The guarded shape above bounds
+    # its largest partial buffer to 16 * 16 * 24 elements.
+    mhc_pre_mix_hc4(
+        projection,
+        square_sum,
+        scale,
+        base,
+        pre,
+        post,
+        comb,
+        hidden_size=hidden,
+        rms_eps=rms_eps,
+        hc_eps=hc_eps,
+        sinkhorn_iters=sinkhorn_iters,
+        n_splits=splits,
+        num_tokens=tokens,
+    )
+    return pre, post, comb
 
 
 @triton.jit(do_not_specialize=["X0", "X1"])

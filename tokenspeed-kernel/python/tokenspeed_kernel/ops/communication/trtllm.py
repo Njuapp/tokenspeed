@@ -276,6 +276,7 @@ if current_platform().is_nvidia:
             self.workspace_tensor = None
             self.ipc_handles = None
             self.mnnvl_workspace = None
+            self.pcie_workspace = None
             self.world_size = None
             self.rank = None
             self.max_token_num = None
@@ -355,6 +356,14 @@ if current_platform().is_nvidia:
             self.mnnvl_workspace = _try_create_mnnvl_workspace(
                 rank, world_size, max_token_num, hidden_dim, group
             )
+            if not _skip_ipc and world_size == 8:
+                from tokenspeed_kernel.ops.communication._triton.pcie_all_reduce import (
+                    create_pcie_all_reduce_workspace,
+                )
+
+                self.pcie_workspace = create_pcie_all_reduce_workspace(
+                    group, min(max_token_num, 16) * hidden_dim
+                )
 
             # With IPC skipped, mnnvl is the only workspace; if it failed to
             # arm there is nothing to fuse with -- stay uninitialized so
@@ -405,6 +414,7 @@ if current_platform().is_nvidia:
                     # symm_mem allocations are process-lifetime; dropping the
                     # reference is all we can (and need to) do here.
                     self.mnnvl_workspace = None
+                    self.pcie_workspace = None
                     self.initialized = False
                     self.world_size = None
                     self.rank = None
@@ -849,6 +859,15 @@ if current_platform().is_nvidia:
         manager = _manager_for_group(group)
         if not manager.initialized:
             return None
+
+        if manager.pcie_workspace is not None and not fp32_acc:
+            # This tree changes the FP32 association order. The explicit
+            # rank-ordered route below must retain its original fold.
+            # Larger PCIe payloads return to NCCL instead of one-shot IPC.
+            if not manager.pcie_workspace.supports(input_tensor):
+                return None
+            _mark_captured(manager, manager.pcie_workspace.buffer)
+            return manager.pcie_workspace.all_reduce(input_tensor, out)
 
         tensor_2d = input_tensor.reshape(-1, input_tensor.shape[-1])
         token_num, hidden_dim = tensor_2d.shape

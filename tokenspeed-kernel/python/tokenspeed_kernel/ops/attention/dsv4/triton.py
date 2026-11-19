@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import torch
 from tokenspeed_kernel._triton import tl, triton
-from tokenspeed_kernel.platform import CapabilityRequirement
+from tokenspeed_kernel.platform import ArchVersion, CapabilityRequirement
 from tokenspeed_kernel.registry import Priority, register_kernel
 from tokenspeed_kernel.signature import dense_tensor_format, format_signature
 
@@ -196,6 +196,84 @@ def triton_dsv4_prefill(
         BLOCK_TOPK=16,
         BLOCK_DIM=triton.next_power_of_2(DEEPSEEK_V4_HEAD_DIM),
         num_warps=4,
+        num_stages=1,
+    )
+    return output
+
+
+@register_kernel(
+    "attention",
+    "dsv4_prefill",
+    name="triton_dsv4_prefill_sm120",
+    solution="triton",
+    capability=CapabilityRequirement(
+        min_arch_version=ArchVersion(12, 0),
+        max_arch_version=ArchVersion(12, 0),
+        vendors=frozenset({"nvidia"}),
+    ),
+    signatures=frozenset(
+        {
+            format_signature(
+                q=dense_tensor_format(torch.bfloat16),
+                kv=dense_tensor_format(torch.bfloat16),
+            )
+        }
+    ),
+    traits={
+        "head_dim": frozenset({DEEPSEEK_V4_HEAD_DIM}),
+        "cache_layout": frozenset({"dense_workspace"}),
+        "metadata_dtypes": frozenset({torch.int32, torch.int64}),
+        "sinks": frozenset({True, False}),
+        "return_lse": frozenset({True, False}),
+    },
+    priority=Priority.PERFORMANT,
+)
+def triton_dsv4_prefill_sm120(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    indices: torch.Tensor,
+    lens: torch.Tensor,
+    attn_sink: torch.Tensor | None,
+    softmax_scale: float,
+    out: torch.Tensor | None = None,
+    lse: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Run the dsv4_prefill contract with shared K/V tiles on SM120.
+
+    Arguments and returns follow ``dsv4_prefill``. Groups of 16 heads share
+    each selected K/V tile. QK uses BF16 tensor cores with FP32 accumulation.
+    PV uses TF32x3 to retain FP32 probabilities and the caller's BF16 K/V.
+    """
+    from tokenspeed_kernel.ops.attention.dsv4._triton.compact import (
+        _compact_attention,
+    )
+
+    kv_rows = kv.reshape(-1, kv.shape[-1])
+    output = torch.empty_like(q) if out is None else out
+    head_groups = triton.cdiv(q.shape[1], 16)
+    warps = 4 if q.shape[0] * head_groups >= 1024 else 8
+    _compact_attention[(q.shape[0], head_groups)](
+        q,
+        kv_rows,
+        indices,
+        lens,
+        attn_sink,
+        output,
+        lse,
+        *q.stride(),
+        *kv_rows.stride(),
+        *indices.stride(),
+        lens.stride(0),
+        0 if attn_sink is None else attn_sink.stride(0),
+        *output.stride(),
+        indices.shape[1],
+        kv_rows.shape[0],
+        q.shape[1],
+        softmax_scale,
+        attn_sink is not None,
+        lse is not None,
+        32,
+        num_warps=warps,
         num_stages=1,
     )
     return output

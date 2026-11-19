@@ -43,6 +43,22 @@ four tensor ops per MoE layer per forward). Its arguments must follow the
 compile-time parameter rule: token count, top-k, and table width are runtime
 arguments or bucketed, never `constexpr`.
 
+## Marlin expert partitions
+
+The Marlin weight preprocessor pads intermediate dimensions to a multiple of
+64. It pads the gate and up halves separately with zero E2M1 weights, and
+pads the corresponding down-projection input channels. Padded UE8M0 scales
+encode 1. This preserves the activation pairs and adds only zero products.
+For example, a TP shard with 288 channels runs with 320 channels. The loader's
+logical shard size stays unchanged; the Marlin workspace uses the padded size.
+
+Marlin maps global route IDs to each rank's contiguous expert range with one
+Triton launch. The mapper preserves negative route markers and emits -1 for
+remote experts. It accepts strided ID tensors and returns contiguous int32
+IDs. Token counts, route counts, strides, and partition bounds are runtime
+arguments. Address calculations use int64. The expert weights, activation,
+GEMMs, and final route sum keep their existing numerical behavior.
+
 ## FlashInfer adapters (`flashinfer.py`)
 
 ### Opt-in SM90 block-FP8 grouped MoE
@@ -536,6 +552,19 @@ the CuTe kernel retains its own layouts and alignment. Each forward executes
 one collective with no 128-token chunk loop. All layers and captured capacities
 continue to share stable workspace addresses. Kimi K3 writes packed activations
 and routes directly into views of this full-capacity symmetric allocation.
+
+## DeepSeek V4 MegaMoE shared expert (`deep_gemm.py`)
+
+DeepGEMM's MXFP4 MegaMoE can run one MXFP8 shared expert of the routed
+experts' intermediate size inside the same launch. The MoE plan exposes this
+as `fuse_shared_expert`; `MoELayer.fuse_shared_expert` hands over the shared
+expert's E4M3 weights and UE8M0 scale bytes once the routed weights are
+processed. They are re-laid out in place like a routed expert (gate/up rows
+interleaved by eight, scales packed four per int32 and UTCCP-transposed), and
+the routed output then includes the shared expert. The input staging kernel
+also writes the activation scales the shared expert reads: MN-major, with rows
+grouped by the BLOCK_M MegaMoE picks for the token count. The shared expert's
+SwiGLU uses the routed experts' clamp.
 
 ## Kimi-K3 TP8 decode chain (`_cute_dsl/k3_decode.py`)
 

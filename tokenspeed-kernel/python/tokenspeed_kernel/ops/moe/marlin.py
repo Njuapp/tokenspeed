@@ -40,6 +40,7 @@ from tokenspeed_kernel.ops.moe._deep_ep.layout import (
     pack_recv_rows,
     unpack_recv_rows,
 )
+from tokenspeed_kernel.ops.moe._triton.expert_ids import local_expert_ids
 from tokenspeed_kernel.platform import ArchVersion, CapabilityRequirement
 from tokenspeed_kernel.registry import Priority, register_kernel
 from tokenspeed_kernel.signature import format_signatures
@@ -53,6 +54,7 @@ from tokenspeed_kernel.thirdparty.cuda.marlin_moe import (
 )
 
 MXFP4_BLOCK = 32
+MARLIN_INTERMEDIATE_ALIGNMENT = 64
 
 
 def _block_size_m(num_tokens: int, top_k: int, num_experts: int) -> int:
@@ -99,8 +101,9 @@ def marlin_mxfp4_moe_weights(plan: dict, w: torch.nn.Module) -> None:
     Input (from the mxfp4 weight loader): ``w13_weight``/``w2_weight`` packed
     E2M1 as uint8 ``[E, N, K//2]`` and ``w13_weight_scale``/``w2_weight_scale``
     raw E8M0 as uint8 ``[E, N, K//32]``. Output: Marlin-repacked int32 weights
-    and permuted float8_e8m0fnu scales, written back onto the module. K3's
-    expert shapes are already aligned (latent 3584%256, ispp 3072%128), so no padding.
+    and permuted float8_e8m0fnu scales, written back onto the module. The
+    intermediate dimension is padded to 64 for the grouped GEMM tiles.
+    Gate and up channels receive separate zero tails before repacking.
     """
     names = ("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale")
     if any(not hasattr(w, name) for name in names):
@@ -130,6 +133,34 @@ def marlin_mxfp4_moe_weights(plan: dict, w: torch.nn.Module) -> None:
             f"Marlin MXFP4 needs hidden%256==0 and ispp%32==0, got "
             f"hidden={hidden}, ispp={ispp}"
         )
+
+    padded_ispp = (
+        (ispp + MARLIN_INTERMEDIATE_ALIGNMENT - 1)
+        // MARLIN_INTERMEDIATE_ALIGNMENT
+        * MARLIN_INTERMEDIATE_ALIGNMENT
+    )
+    if padded_ispp != ispp:
+        pad = padded_ispp - ispp
+        # FC1 tiles contain 128 gate/up channels; FC2 consumes 64 K channels.
+        # Keep [gate | up] aligned so the activation pairs the same channels.
+        w13 = torch.cat(
+            [
+                torch.nn.functional.pad(part, (0, 0, 0, pad), value=0)
+                for part in w13.split(ispp, dim=1)
+            ],
+            dim=1,
+        )
+        w13_scale = torch.cat(
+            [
+                torch.nn.functional.pad(part, (0, 0, 0, pad), value=127)
+                for part in w13_scale.split(ispp, dim=1)
+            ],
+            dim=1,
+        )
+        w2 = torch.nn.functional.pad(w2, (0, pad // 2), value=0)
+        # UE8M0 byte 127 represents 1; padded E2M1 codes represent zero.
+        w2_scale = torch.nn.functional.pad(w2_scale, (0, pad // MXFP4_BLOCK), value=127)
+        ispp = padded_ispp
 
     device = w13.device
     perm = torch.empty(0, dtype=torch.int, device=device)
@@ -244,25 +275,12 @@ def marlin_mxfp4_precomputed_moe_apply(
     num_local_experts = int(getattr(w, "num_local_experts", w.w13_weight.shape[0]))
     ep_size = int(getattr(w, "ep_size", 1))
     ep_rank = int(getattr(w, "ep_rank", 0))
-    global_num_experts = num_local_experts * ep_size
-
     topk_ids = topk_ids.to(torch.int32)
     is_ep = ep_size > 1
     if is_ep:
-        # Global -> local id remap: [expert_start, +num_local) -> [0, num_local),
-        # everything else -> -1 (the align kernel parks these in the extra lane
-        # and the EP GEMM skips those blocks). Inputs may already carry -1 in
-        # masked slots (DeepEP recv layout); clamp before the gather so the
-        # negative index cannot wrap to the mapping's last entry, then restore.
-        expert_start = ep_rank * num_local_experts
-        mapping = torch.full(
-            (global_num_experts,), -1, dtype=torch.int32, device=topk_ids.device
-        )
-        mapping[expert_start : expert_start + num_local_experts] = torch.arange(
-            num_local_experts, dtype=torch.int32, device=topk_ids.device
-        )
-        local_topk_ids = torch.where(
-            topk_ids < 0, topk_ids, mapping[topk_ids.long().clamp_(min=0)]
+        # Keep negative route markers; the align kernel skips remote experts.
+        local_topk_ids = local_expert_ids(
+            topk_ids, ep_rank * num_local_experts, num_local_experts
         )
     else:
         local_topk_ids = topk_ids

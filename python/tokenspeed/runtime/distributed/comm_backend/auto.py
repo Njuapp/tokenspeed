@@ -290,7 +290,13 @@ class AutoBackend(CommBackend):
         the group verdict is a local lookup with no dispatch-time collective.
         """
         from tokenspeed_kernel.ops.communication.fabric import group_has_fabric
+        from tokenspeed_kernel.ops.communication.multimem import multimem_available
 
+        # A node-local PCIe group can share IPC pointers without supporting
+        # multicast stores. Those stores would dereference a null multicast
+        # pointer, so consult the kernel package's capability probe first.
+        if current_platform().is_nvidia and not multimem_available():
+            return False
         if not AutoBackend._group_spans_nodes(group):
             return True
         return group_has_fabric(group)

@@ -586,6 +586,10 @@ class ServerArgs:
     deepseek_v41_attention_query_parallel_size: int = 1
     deepseek_v41_indexer_query_parallel_size: int = 1
     deepseek_v4_mega_moe_max_num_tokens: int = 0
+    # How a MegaMoE kernel with more than one transport moves rows between EP
+    # ranks. None for kernels with a single transport; the SM120 kernel
+    # requires a choice.
+    mega_moe_transport: str | None = None
     deepseek_v4_indexer_prefill_max_logits_mb: int = 512
     # DeepSeek V4.1 Engram host tables. Off by default (GPU-sharded).
     engram_host_table: bool = False
@@ -3545,6 +3549,22 @@ class ServerArgs:
             help=(
                 "DeepSeek V4.1 MegaMoE staging-buffer cap on tokens per forward "
                 "(0 = derive from chunked-prefill / cuda-graph budgets)."
+            ),
+        )
+        parser.add_argument(
+            "--mega-moe-transport",
+            type=str,
+            default=ServerArgs.mega_moe_transport,
+            choices=["all_gin", "all_lsa", "lsa_where_reachable", "auto", "tuned"],
+            help=(
+                "Required by the SM120 MegaMoE: how EP ranks exchange rows. "
+                "all_gin uses NCCL GPU-initiated networking for every pair and "
+                "works on any topology; all_lsa uses load/store through peer "
+                "mappings and needs every pair on one host; "
+                "lsa_where_reachable uses load/store inside a host and "
+                "GPU-initiated networking across hosts; auto probes the "
+                "candidates at startup; tuned reads FlashInfer's offline knob "
+                "cache. Other MegaMoE kernels have one transport and ignore it."
             ),
         )
         parser.add_argument(

@@ -5,6 +5,33 @@ projection and cuBLASLt NVFP4 GEMM provider. Without it, the NVFP4 leaf is not
 registered and a direct fused-A call reports the missing package; importing
 other GEMM providers does not require the extension.
 
+## SM120 MXFP8
+
+On SM120, `flashinfer_mm_mxfp8` uses FlashInfer's `b12x` CuTe DSL backend.
+This path requires CUDA 13+, CUTLASS DSL 4.6+, E4M3 operands, and one UE8M0
+scale per 32 K elements. N and K must be at least 128, and K must be divisible
+by 128. Shapes such as K=288 keep the canonical-scale fallback.
+The SM120 fallback uses a 16-row Triton tile for N=5120, K=288, group size
+1x32, and M in 1..16. Other fallback shapes retain their existing tile policy.
+FP32 activation scales also keep their compatible fallback; b12x consumes
+UE8M0 activation and weight scales.
+
+For BF16 output with M in 1..16, K=5120, and N=576 or 1792, the same
+FlashInfer provider uses a 16x128 tile with eight K slices. Each slice writes
+FP32 partial sums. A separate reduction sums them in FP32 and rounds once
+to BF16. This increases parallelism for these narrow projections. It retains
+the original E4M3 operands and UE8M0 scales. The changed reduction order can
+change output rounding. Other shapes and FP16 output use the normal b12x
+selection. The split-K compiled callable uses runtime tensor dimensions;
+changing M does not compile another kernel.
+
+`prepare_mxfp8_weight_scales` checks these constraints before creating the
+F8_128x4 weight-scale layout. The existing `mm(prepacked_scales=True)` path
+quantizes activations into that layout. It serves eager execution and CUDA
+Graph capture with the same call. An aligned contiguous `out` is passed
+directly to b12x; other supported output views receive a copy. SM10x continues
+to use its existing CuTe DSL backend.
+
 ## Blackwell block-FP8 automatic selection
 
 For standard FP32-scaled 128x128 block-FP8 GEMM on SM10x, automatic selection
@@ -110,3 +137,23 @@ converts canonical FP32 1x128 activation and 128x128 weight scales to the
 required layout without UE8M0 rounding. Conversion is part of each call,
 including graph capture; no persistent weight cache is created. Unsupported
 forced calls fail explicitly. It does not claim batch-invariant numerics.
+
+## Grouped FP8 projection
+
+`grouped_fp8_projection` computes `einsum('tgk,gnk->tgn')` from E4M3
+activations and weights that both carry one UE8M0 scale per 32 K channels
+(DeepSeek V4.1's grouped `wo_a`). `prepare_grouped_fp8_projection` re-lays the
+canonical `[groups * N, K / 32]` weight scales out once for the serving kernel
+and returns None where no kernel serves the weights, so callers keep their
+dequantized BF16 path. `has_grouped_fp8_projection` answers the same question
+from the device and shape alone, before any weight is loaded. The DeepGEMM
+kernel (SM100/SM103) takes activation scales packed four per int32, MN-major
+and TMA-aligned, which is what `dsv41.rope_quantize_fp8_grouped` writes.
+`grouped_fp8_projection_quantize_fp8` instead writes E4M3 codes of the
+BF16-rounded result with packed scales in that same layout, which
+`fp8_projection` (a dense E4M3 GEMM, `prepare_fp8_projection` for its weight
+scales) reads directly, so no quantization kernel runs between the two.
+
+DeepGEMM picks a tile configuration from the token count (one per 16 tokens)
+and JIT-compiles each on first use. `warmup_fp8_projections` launches every
+configuration up to a token bound at startup so serving never compiles.

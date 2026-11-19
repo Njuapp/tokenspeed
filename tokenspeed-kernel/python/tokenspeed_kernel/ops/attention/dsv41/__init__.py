@@ -74,6 +74,7 @@ __all__ = [
     "index_query_rope_weights",
     "index_query_rope_quant",
     "selected_attention",
+    "selected_attention_query_heads",
     "selected_attention_rope",
     "new_attention_schedule",
     "index_score",
@@ -91,6 +92,7 @@ __all__ = [
     "rope_inplace",
     "rope_weights_inplace",
     "rope_pad_query",
+    "rope_quantize_fp8_grouped",
     "dspark_rows",
     "dspark_anchors",
     "dspark_block",
@@ -356,6 +358,27 @@ def new_attention_schedule() -> object | None:
     from tokenspeed_kernel.ops.attention.dsv41.flash_mla import new_flashmla_schedule
 
     return new_flashmla_schedule()
+
+
+def selected_attention_query_heads(num_heads: int) -> int:
+    """Return the query head geometry used by this device's decode attention.
+
+    Args:
+        num_heads: Number of real query heads on this rank, from 1 to 128.
+
+    Returns:
+        The real head count for SM120, whose paged implementation accepts it.
+        Other targets keep the existing 64/128-head FlashMLA input geometry.
+        This is static model metadata; it does not depend on the batch size.
+    """
+    from tokenspeed_kernel.platform import ArchVersion, current_platform
+
+    if not 1 <= num_heads <= 128:
+        raise ValueError("V4.1 decode requires 1..128 query heads per rank")
+    platform = current_platform()
+    if platform.is_nvidia and platform.arch_version == ArchVersion(12, 0):
+        return num_heads
+    return 64 if num_heads <= 64 else 128
 
 
 def selected_attention(
@@ -915,6 +938,35 @@ def rope_pad_query(
     return kernel(values, positions, cos_sin_cache)
 
 
+def rope_quantize_fp8_grouped(
+    values: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    groups: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Rotate each head's interleaved RoPE tail and FP8-quantize grouped heads.
+
+    Args:
+        values: BF16 [T,H,512], unit channel stride, arbitrary token/head
+            strides; H divisible by groups.
+        positions: Int32/int64 [T]; negative positions use table row 0.
+        cos_sin_cache: FP32 [max_positions,64], cosine then sine halves, applied
+            with rope_inplace's formula (pass the inverse table to undo RoPE).
+        groups: Number of output head groups, each D = H/groups*512 wide.
+
+    Returns:
+        codes: FP8 E4M3 [T,groups,D], a view of contiguous [groups,T,D].
+        scales: Int32 [T,groups,D/128], MN-major and TMA-aligned (strides
+            (1, D/128*aligned_T, aligned_T), aligned_T = ceil(T/4)*4). Each
+            element packs four UE8M0 exponents of 32-channel groups, byte j
+            for group 4w+j, matching DeepGEMM's SM100 scale layout. The rotated
+            values are rounded to BF16 before quantizing.
+    """
+    return _kernel("rope_quantize_fp8_grouped", values)(
+        values, positions, cos_sin_cache, groups
+    )
+
+
 def dspark_rows(
     values: torch.Tensor,
     norm_weight: torch.Tensor | None,
@@ -1397,6 +1449,7 @@ def history_pack(cache, table, visible_rows, *, virtual_block_count, degree, ran
 # Backend registration (side-effect imports)
 # isort: off
 import tokenspeed_kernel.ops.attention.dsv41.triton  # noqa: E402,F401
+import tokenspeed_kernel.ops.attention.dsv41.flashinfer  # noqa: E402,F401
 import tokenspeed_kernel.ops.attention.dsv41._triton.rope  # noqa: E402,F401
 import tokenspeed_kernel.ops.attention.dsv41._triton.kvp  # noqa: E402,F401
 import tokenspeed_kernel.ops.attention.dsv41.gluon  # noqa: E402,F401

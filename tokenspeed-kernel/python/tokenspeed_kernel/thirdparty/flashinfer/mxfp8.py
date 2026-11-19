@@ -34,6 +34,17 @@ import types
 from flashinfer.gemm import gemm_base
 
 
+def has_sm120_mxfp8() -> bool:
+    """Whether the installed FlashInfer can compile its SM120 MXFP8 backend."""
+    try:
+        from flashinfer.gemm.gemm_mm_mxfp8_cute_dsl import _b12x_mxfp8_dsl_supported
+    except ImportError:
+        return False
+    from flashinfer.jit.cpp_ext import get_cuda_version
+
+    return get_cuda_version().major >= 13 and _b12x_mxfp8_dsl_supported()
+
+
 def _uses_narrow_multi_tile(tactic, inputs) -> bool:
     tile, _, swap_ab, _, split_k_slices = tactic
     kernel_n = inputs[0].shape[0] if swap_ab else inputs[1].shape[1]

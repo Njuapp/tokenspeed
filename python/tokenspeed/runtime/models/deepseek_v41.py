@@ -82,6 +82,7 @@ from tokenspeed_kernel.ops.attention.dsv41 import (
     rope_inplace,
     rope_pad_query,
     rope_weights_inplace,
+    selected_attention_query_heads,
 )
 from tokenspeed_kernel.ops.gemm import (
     dsv4_linear_fp32,
@@ -909,8 +910,7 @@ class DeepseekV41Attention(nn.Module):
         self.mapping = mapping
         self.head_dim = config.head_dim
         self.n_local_heads = config.num_attention_heads // mapping.attn.head_tp_size
-        # FlashMLA decode takes 64 or 128 query heads.
-        self.n_kernel_heads = 64 if self.n_local_heads <= 64 else 128
+        self.n_kernel_heads = selected_attention_query_heads(self.n_local_heads)
         self.n_local_groups = config.o_groups // mapping.attn.head_tp_size
         self.o_lora_rank = config.o_lora_rank
         self.compress_ratio = config.compress_ratios[layer_id]
@@ -1418,7 +1418,7 @@ class DeepseekV41MoE(DeepseekV4MoE):
         alignment = (
             128
             if mega_moe
-            and current_platform().is_blackwell
+            and current_platform().is_blackwell_plus
             and config.expert_dtype == "fp4"
             else 512
         )

@@ -1833,6 +1833,7 @@ def moe_plan(
     deepep_mode: str | None = None,
     deepep_low_latency_max_num_tokens_per_gpu: int | None = None,
     persistent_max_num_tokens_per_gpu: int | None = None,
+    mega_moe_transport: str | None = None,
     fast_math: bool,
     combine_order: str,
     features: frozenset[str],
@@ -1897,6 +1898,10 @@ def moe_plan(
             can run the low-latency legs; batches above it must use normal mode.
         persistent_max_num_tokens_per_gpu: Optional fixed per-GPU capacity for
             implementations that own persistent communication buffers.
+        mega_moe_transport: How a MegaMoE kernel that can exchange rows over
+            more than one transport moves them between EP ranks, for example
+            "all_gin" or "lsa_where_reachable" for the SM120 kernel. Such a
+            kernel requires it; None for every other kernel.
         fast_math: Whether the selected implementation may use fast math.
             Implementations without a fast-math path always compute precisely.
             Required keyword.
@@ -2057,6 +2062,7 @@ def moe_plan(
             deepep_low_latency_max_num_tokens_per_gpu
         ),
         "persistent_max_num_tokens_per_gpu": persistent_max_num_tokens_per_gpu,
+        "mega_moe_transport": mega_moe_transport,
         "fast_math": fast_math,
         "combine_order": combine_order,
         "cutlass_fused_finalize": True,
