@@ -563,7 +563,11 @@ class DeepseekV4MoE(nn.Module):
         reduced = extremes.tolist()
         largest, smallest = reduced[0::2], [-value for value in reduced[1::2]]
         problems = []
-        if (largest[0], largest[2], largest[3]) != (smallest[0], smallest[2], smallest[3]):
+        if (largest[0], largest[2], largest[3]) != (
+            smallest[0],
+            smallest[2],
+            smallest[3],
+        ):
             problems.append(
                 "EP ranks disagree on the MoE expert placement: this rank's "
                 f"digest is {digest} (format {file_format}, {slots} slots), the "

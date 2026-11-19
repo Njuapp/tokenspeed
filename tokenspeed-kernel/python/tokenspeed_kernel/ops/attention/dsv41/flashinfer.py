@@ -39,7 +39,11 @@ from tokenspeed_kernel.ops.attention.dsv41.triton import (
     _index_gather_heads,
     _index_topk_outputs,
     cache_pack,
+)
+from tokenspeed_kernel.ops.attention.dsv41.triton import (
     index_topk as portable_index_topk,
+)
+from tokenspeed_kernel.ops.attention.dsv41.triton import (
     triton_dsv41_selected_attention_sm120,
 )
 from tokenspeed_kernel.platform import (
@@ -297,9 +301,7 @@ if (
                 if _INDEX_GROUPED and w.dtype == torch.bfloat16
                 else torch.float32
             )
-            rows = torch.empty(
-                (end - start, width), dtype=score_dtype, device=q.device
-            )
+            rows = torch.empty((end - start, width), dtype=score_dtype, device=q.device)
             blocks = torch.empty(
                 (end - start, width // 8 if candidate_topk else 0),
                 dtype=score_dtype,
@@ -503,7 +505,9 @@ def _decode_fallback_reason(
     if q.is_contiguous() and q.data_ptr() % 16:
         return "the query is not 16-byte aligned"
     if swa_cache is None or not _reads_in_place(swa_cache, _SWA_ROW_BYTES):
-        return "the SWA field is not an aligned page-planar V4.1 FP8 [pages, 64, 528] view"
+        return (
+            "the SWA field is not an aligned page-planar V4.1 FP8 [pages, 64, 528] view"
+        )
     if not _selects(swa_slots, swa_lens, tokens):
         return "the SWA selection is not integer [tokens, width >= 1] with [tokens] lengths"
     global_width = 0

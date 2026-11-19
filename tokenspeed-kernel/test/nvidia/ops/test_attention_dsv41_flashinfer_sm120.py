@@ -58,7 +58,9 @@ native = pytest.mark.skipif(
 
 
 def _selected_kernel(gate: str | None) -> str:
-    env = {k: v for k, v in os.environ.items() if k != implementation.SM120_ATTENTION_ENV}
+    env = {
+        k: v for k, v in os.environ.items() if k != implementation.SM120_ATTENTION_ENV
+    }
     if gate is not None:
         env[implementation.SM120_ATTENTION_ENV] = gate
     script = (
@@ -71,7 +73,11 @@ def _selected_kernel(gate: str | None) -> str:
         "traits={'flashmla_eligible': True}).name)\n"
     )
     done = subprocess.run(
-        [sys.executable, "-c", script], env=env, capture_output=True, text=True, check=True
+        [sys.executable, "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     return done.stdout.strip().splitlines()[-1]
 
@@ -106,31 +112,48 @@ def fields():
 def _case(name: str, tokens: int, seed: int):
     generator = torch.Generator(device="cuda").manual_seed(seed)
     stream = torch.arange(tokens, device="cuda") % _STREAMS
-    first = torch.randint(0, _SWA_PAGES * 64 - 128, (tokens,), device="cuda", generator=generator)
+    first = torch.randint(
+        0, _SWA_PAGES * 64 - 128, (tokens,), device="cuda", generator=generator
+    )
     columns = torch.arange(128, device="cuda")
     swa = (stream * _SWA_PAGES * 64 + first)[:, None] + columns[None, :]
     order = torch.rand(tokens, _GLOBAL_PAGES * 64, device="cuda", generator=generator)
-    glob = order.topk(512, dim=1).indices.sort(dim=1).values + stream[:, None] * _GLOBAL_PAGES * 64
+    glob = (
+        order.topk(512, dim=1).indices.sort(dim=1).values
+        + stream[:, None] * _GLOBAL_PAGES * 64
+    )
     swa, glob = swa.to(torch.int32), glob.to(torch.int32)
     swa_len = torch.full((tokens,), 128, device="cuda", dtype=torch.int32)
     glob_len = torch.full((tokens,), 512, device="cuda", dtype=torch.int32)
     if name == "short":
         # History shorter than the window: a valid prefix, then -1 padding.
-        swa_len = torch.randint(0, 129, (tokens,), device="cuda", generator=generator).int()
-        glob_len = torch.randint(0, 513, (tokens,), device="cuda", generator=generator).int()
+        swa_len = torch.randint(
+            0, 129, (tokens,), device="cuda", generator=generator
+        ).int()
+        glob_len = torch.randint(
+            0, 513, (tokens,), device="cuda", generator=generator
+        ).int()
         swa_len[0], glob_len[0] = 0, 0
         swa = swa.masked_fill(columns[None, :] >= swa_len[:, None], -1)
-        glob = glob.masked_fill(torch.arange(512, device="cuda")[None, :] >= glob_len[:, None], -1)
+        glob = glob.masked_fill(
+            torch.arange(512, device="cuda")[None, :] >= glob_len[:, None], -1
+        )
     elif name == "holes":
-        swa = swa.masked_fill(torch.rand(swa.shape, device="cuda", generator=generator) < 0.3, -1)
-        glob = glob.masked_fill(torch.rand(glob.shape, device="cuda", generator=generator) < 0.3, -1)
+        swa = swa.masked_fill(
+            torch.rand(swa.shape, device="cuda", generator=generator) < 0.3, -1
+        )
+        glob = glob.masked_fill(
+            torch.rand(glob.shape, device="cuda", generator=generator) < 0.3, -1
+        )
         swa_len, glob_len = swa_len.fill_(100), glob_len.fill_(300)
     elif name == "duplicates":
         swa, glob = swa[:, columns % 7], glob[:, torch.arange(512, device="cuda") % 33]
     elif name == "no_global_rows":
         glob_len = glob_len.zero_()
     sink = torch.randn(64, device="cuda", generator=generator) * 0.5
-    q = torch.randn(tokens, 64, 512, device="cuda", generator=generator).to(torch.bfloat16)
+    q = torch.randn(tokens, 64, 512, device="cuda", generator=generator).to(
+        torch.bfloat16
+    )
     return q, swa, swa_len, glob, glob_len, sink
 
 
@@ -143,8 +166,14 @@ def _reference(q, swa_field, swa, swa_len, global_field, glob, glob_len, sink):
     ):
         if field is None:
             continue
-        valid = (torch.arange(slots.shape[1], device="cuda")[None, :] < lengths[:, None]) & (slots >= 0)
-        rows.append(portable.cache_gather(field, slots.masked_fill(~valid, -1), layout, None).double())
+        valid = (
+            torch.arange(slots.shape[1], device="cuda")[None, :] < lengths[:, None]
+        ) & (slots >= 0)
+        rows.append(
+            portable.cache_gather(
+                field, slots.masked_fill(~valid, -1), layout, None
+            ).double()
+        )
         masks.append(valid)
     kv, valid = torch.cat(rows, dim=1), torch.cat(masks, dim=1)
     logits = torch.einsum("thd,twd->thw", q.double(), kv) * _SCALE
@@ -172,13 +201,17 @@ def _triton(q, swa_field, swa, swa_len, global_field, glob, glob_len, sink):
 @native
 @pytest.mark.parametrize("with_global", [True, False])
 @pytest.mark.parametrize("tokens", [1, 6, 66])
-@pytest.mark.parametrize("case", ["full", "short", "holes", "duplicates", "no_global_rows"])
+@pytest.mark.parametrize(
+    "case", ["full", "short", "holes", "duplicates", "no_global_rows"]
+)
 def test_native_decode_matches_reference_and_triton(fields, with_global, tokens, case):
     swa_field, global_field = fields
     q, swa, swa_len, glob, glob_len, sink = _case(case, tokens, 17 * tokens + len(case))
     selection = (global_field, glob, glob_len) if with_global else (None, None, None)
     reported = set(implementation._reported_fallbacks)
-    out = _op(q, swa_field, swa, swa_len, *selection, sink, dsv41.new_attention_schedule())
+    out = _op(
+        q, swa_field, swa, swa_len, *selection, sink, dsv41.new_attention_schedule()
+    )
     # Served natively: the device and head count are warm and nothing fell back.
     assert (q.get_device(), 64) in implementation._warmed_decode
     assert implementation._reported_fallbacks == reported
@@ -232,7 +265,9 @@ def test_calls_the_family_does_not_serve_run_the_triton_reader(fields):
     odd = torch.zeros(4 * (64 * 528 + 8), dtype=torch.uint8, device="cuda")
     odd = odd.as_strided((4, 64, 528), (64 * 528 + 8, 528, 1))
     rows = torch.randn(4 * 64, 512, device="cuda", dtype=torch.bfloat16)
-    portable.cache_scatter(rows, odd, torch.arange(4 * 64, device="cuda", dtype=torch.int32), "swa")
+    portable.cache_scatter(
+        rows, odd, torch.arange(4 * 64, device="cuda", dtype=torch.int32), "swa"
+    )
     local = (swa % (4 * 64)).masked_fill(swa < 0, -1)
     torch.testing.assert_close(
         _op(q, odd, local, swa_len, None, None, None, sink, schedule),

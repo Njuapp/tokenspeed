@@ -64,7 +64,11 @@ def _switch(value: str | None) -> str:
         "print(flashinfer._INDEX_GROUPED)\n"
     )
     done = subprocess.run(
-        [sys.executable, "-c", script], env=env, capture_output=True, text=True, check=True
+        [sys.executable, "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     return done.stdout.strip().splitlines()[-1]
 
@@ -129,7 +133,20 @@ def _run(monkeypatch, grouped, cache, q, w, table, visible, candidate_topk, out=
 
     monkeypatch.setattr(implementation, "topk_small_indices", recording)
     result = implementation.flashinfer_dsv41_index_topk(
-        q, w, cache, table, visible, None, 512, candidate_topk, 8, 1024, 256, None, out, None
+        q,
+        w,
+        cache,
+        table,
+        visible,
+        None,
+        512,
+        candidate_topk,
+        8,
+        1024,
+        256,
+        None,
+        out,
+        None,
     )
     monkeypatch.setattr(implementation, "topk_small_indices", select)
     return [tensor.clone() for tensor in result], seen
@@ -154,7 +171,9 @@ def _layout(name):
     return table, visible
 
 
-@pytest.mark.parametrize("layout", ["broadcast", "paged-6", "paged-5", "paged-1", "holes"])
+@pytest.mark.parametrize(
+    "layout", ["broadcast", "paged-6", "paged-5", "paged-1", "holes"]
+)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("candidate_topk", [0, 2048])
 def test_grouped_scores_and_selections_are_identical(
@@ -162,8 +181,12 @@ def test_grouped_scores_and_selections_are_identical(
 ):
     table, visible = _layout(layout)
     q, w = _queries(table.shape[0], dtype, seed=3)
-    want, want_scores = _run(monkeypatch, False, cache, q, w, table, visible, candidate_topk)
-    got, got_scores = _run(monkeypatch, True, cache, q, w, table, visible, candidate_topk)
+    want, want_scores = _run(
+        monkeypatch, False, cache, q, w, table, visible, candidate_topk
+    )
+    got, got_scores = _run(
+        monkeypatch, True, cache, q, w, table, visible, candidate_topk
+    )
     for expected, actual in zip(want, got, strict=True):
         assert torch.equal(expected, actual)
     assert len(want_scores) == len(got_scores) == (2 if candidate_topk else 1)

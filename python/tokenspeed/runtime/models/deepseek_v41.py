@@ -236,6 +236,7 @@ def _sm120_mxfp8_experiments_supported() -> bool:
         return False
     return bool(_sm120_mxfp8 and has_flashinfer_mxfp8())
 
+
 # Decode small-item switches (r2-dsmall), all off by default and read once at
 # import: with none set this module behaves as before. Each is bit-identical.
 #   TOKENSPEED_SM120_RMSNORM_SWIZZLED_SCALES=1: in decode, q_norm's fused
@@ -3764,7 +3765,9 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
         if not _sm120_mxfp8_experiments_supported():
             logger.warning("TOKENSPEED_SM120_WO_A_MXFP8 ignored: no SM120 MXFP8 GEMM")
             return
-        active = [layer.attn for layer in self.model.layers if layer.attn.ensure_wo_a_fp8()]
+        active = [
+            layer.attn for layer in self.model.layers if layer.attn.ensure_wo_a_fp8()
+        ]
         logger.info(
             f"SM120 MXFP8 wo_a active on {len(active)}/{len(self.model.layers)} layers"
         )

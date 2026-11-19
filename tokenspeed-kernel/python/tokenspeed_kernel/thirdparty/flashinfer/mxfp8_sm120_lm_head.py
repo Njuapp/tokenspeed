@@ -121,7 +121,9 @@ def prepare_mxfp8_lm_head(head: torch.Tensor) -> bool:
         _HEADS[key] = (codes, scales)
     if not torch.cuda.is_current_stream_capturing():
         # Compile the GEMM now: rows are runtime values.
-        dummy = torch.zeros((2, head.shape[1]), dtype=torch.bfloat16, device=head.device)
+        dummy = torch.zeros(
+            (2, head.shape[1]), dtype=torch.bfloat16, device=head.device
+        )
         mxfp8_lm_head_logits(dummy, _HEADS[key], torch.float16)
     return True
 

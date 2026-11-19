@@ -58,7 +58,13 @@ def _inputs(tokens: int, seed: int) -> dict[str, torch.Tensor]:
     base = normal(24) * 0.5
     # Coefficients of the sublayer in front, as the model holds them.
     pre, post, comb = mhc_mixes(
-        residual, normal(24, 4 * _HIDDEN) * 0.01, scale, base, _RMS_EPS, _HC_EPS, _SINKHORN
+        residual,
+        normal(24, 4 * _HIDDEN) * 0.01,
+        scale,
+        base,
+        _RMS_EPS,
+        _HC_EPS,
+        _SINKHORN,
     )
     return {
         "x": normal(tokens, _HIDDEN).to(torch.bfloat16),
@@ -83,7 +89,13 @@ def _separate(d: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
 
 def _fused(d: dict[str, torch.Tensor]):
     return implementation.mhc_post_input_norm_hc4(
-        d["x"], d["residual"], d["pre"], d["post"], d["comb"], d["norm_weight"], _RMS_EPS
+        d["x"],
+        d["residual"],
+        d["pre"],
+        d["post"],
+        d["comb"],
+        d["norm_weight"],
+        _RMS_EPS,
     )
 
 
@@ -129,7 +141,14 @@ def test_row_counts_share_one_binary():
 
 def _mixes(d: dict[str, torch.Tensor], min_splits: int):
     return implementation._mhc_mixes_tensor_sm120_min_splits(
-        d["residual"], d["weight"], d["scale"], d["base"], _RMS_EPS, _HC_EPS, _SINKHORN, min_splits
+        d["residual"],
+        d["weight"],
+        d["scale"],
+        d["base"],
+        _RMS_EPS,
+        _HC_EPS,
+        _SINKHORN,
+        min_splits,
     )
 
 

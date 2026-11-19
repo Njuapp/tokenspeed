@@ -21,7 +21,6 @@
 """Direct readers for V4.1 selected attention with FP32 partial softmax."""
 
 import torch
-
 from tokenspeed_kernel._triton import tl, triton
 from tokenspeed_kernel.ops.attention.dsv41._triton.nvidia_fp4 import decode_e2m1_pair
 from tokenspeed_kernel.ops.attention.dsv41.triton import _planar_offset

@@ -22,7 +22,7 @@
 
 from __future__ import annotations
 
-from tokenspeed_kernel._triton import triton, tl
+from tokenspeed_kernel._triton import tl, triton
 
 
 @triton.jit(do_not_specialize=["WIDTH", "ROWS", "IS0", "IS1"])

@@ -138,6 +138,7 @@ def _requests_cover_rows(requests, total: int) -> bool:
         stop = rows.stop
     return stop == total
 
+
 # Initial long-prefill thresholds; tune with query count and visible history.
 _INDEXER_PARTITION_MIN_QUERIES = 4096
 _INDEXER_PARTITION_MIN_HISTORY = 8192

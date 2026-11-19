@@ -124,14 +124,19 @@ def _pipelined(q, kv, indices, lens, sink, *, residual):
 
 def _inputs(rows, heads, width, seed, q_scale=1.0):
     generator = torch.Generator(device="cuda").manual_seed(seed)
-    q = (torch.randn(rows, heads, 512, generator=generator, device="cuda") * q_scale).to(
-        torch.bfloat16
-    )
+    q = (
+        torch.randn(rows, heads, 512, generator=generator, device="cuda") * q_scale
+    ).to(torch.bfloat16)
     kv = torch.randn(_KV_ROWS, 512, generator=generator, device="cuda").to(
         torch.bfloat16
     )
     indices = torch.randint(
-        0, _KV_ROWS, (rows, width), generator=generator, device="cuda", dtype=torch.int32
+        0,
+        _KV_ROWS,
+        (rows, width),
+        generator=generator,
+        device="cuda",
+        dtype=torch.int32,
     )
     lens = torch.full((rows,), width, dtype=torch.int32, device="cuda")
     sink = torch.randn(heads, generator=generator, device="cuda")
@@ -169,7 +174,9 @@ def test_pipelined_without_residual_matches_bf16(heads, has_sink, rows, width):
     rows may round a few values in 10^4 differently (measured at most 4e-4 of
     the values and a relative L2 gap of 9.3e-5).
     """
-    q, kv, indices, lens, sink, _ = _inputs(rows, heads, width, seed=rows * 1000 + width)
+    q, kv, indices, lens, sink, _ = _inputs(
+        rows, heads, width, seed=rows * 1000 + width
+    )
     sink = sink if has_sink else None
     expected = _bf16(q, kv, indices, lens, sink)
     actual = _pipelined(q, kv, indices, lens, sink, residual=False)
@@ -192,7 +199,9 @@ def test_pipelined_without_residual_matches_bf16(heads, has_sink, rows, width):
     [(1, 640), (3, 1), (5, 31), (7, 32), (9, 33), (40, 128), (33, 640), (200, 96)],
 )
 def test_pipelined_matches_bf16x2_bitwise(heads, has_sink, rows, width):
-    q, kv, indices, lens, sink, _ = _inputs(rows, heads, width, seed=rows * 1000 + width)
+    q, kv, indices, lens, sink, _ = _inputs(
+        rows, heads, width, seed=rows * 1000 + width
+    )
     sink = sink if has_sink else None
     expected = _bf16x2(q, kv, indices, lens, sink)
     actual = _pipelined(q, kv, indices, lens, sink, residual=True)
@@ -233,7 +242,8 @@ def test_pipelined_matches_bf16x2_on_invalid_entries(has_sink, index_dtype):
 def test_pipelined_matches_bf16x2_on_flat_and_peaked_rows(q_scale):
     q, kv, indices, lens, sink, _ = _inputs(64, 64, 640, seed=23, q_scale=q_scale)
     assert torch.equal(
-        _pipelined(q, kv, indices, lens, sink, residual=True), _bf16x2(q, kv, indices, lens, sink)
+        _pipelined(q, kv, indices, lens, sink, residual=True),
+        _bf16x2(q, kv, indices, lens, sink),
     )
 
 

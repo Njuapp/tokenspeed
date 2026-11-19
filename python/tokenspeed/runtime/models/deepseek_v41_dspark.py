@@ -270,9 +270,7 @@ class DeepseekV41DSparkModel(DeepseekV41Model):
 
                 prepared = mxfp8_lm_head(head)
                 if prepared is not None:
-                    logits = mxfp8_lm_head_logits(
-                        flat, prepared, torch.float16
-                    ).float()
+                    logits = mxfp8_lm_head_logits(flat, prepared, torch.float16).float()
             if logits is None:
                 # dsv4_linear_fp32's NVIDIA kernels are router GEMMs sized for
                 # expert counts, not a vocabulary shard.

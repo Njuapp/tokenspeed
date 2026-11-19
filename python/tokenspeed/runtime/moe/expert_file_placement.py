@@ -142,9 +142,7 @@ class FileExpertPlacement:
             slots[own[index]] = ep_rank * local + index
         return slots
 
-    def id_map(
-        self, layer_id: int, ep_rank: int, device: torch.device
-    ) -> torch.Tensor:
+    def id_map(self, layer_id: int, ep_rank: int, device: torch.device) -> torch.Tensor:
         """int32 ``[num_experts]``: logical expert id -> slot, as ``ep_rank`` routes."""
         return torch.tensor(
             self.rank_logical_to_physical(layer_id, ep_rank),
@@ -268,7 +266,8 @@ def load_expert_placement(
     ep_sizes = data.get("ep_sizes")
     if not isinstance(ep_sizes, list) or ep_size not in ep_sizes:
         raise _fail(
-            path, f"placement was solved for EP sizes {ep_sizes}, the model runs EP {ep_size}"
+            path,
+            f"placement was solved for EP sizes {ep_sizes}, the model runs EP {ep_size}",
         )
     if ep_size < 2 or num_experts % ep_size:
         raise _fail(path, f"{num_experts} experts do not divide over EP {ep_size}")
@@ -567,7 +566,8 @@ class ExpertLoadProfile:
         replayed: set[str] = set()
         for key, info in self.groups.items():
             members = sorted(
-                (c for c in self.counters if c.group == key), key=lambda c: c.layer_index
+                (c for c in self.counters if c.group == key),
+                key=lambda c: c.layer_index,
             )
             layers = []
             for counter in members:
@@ -592,7 +592,11 @@ class ExpertLoadProfile:
                     if counter.captures[index] > 0:
                         replayed.add(mode)
                 layers.append(
-                    {"layer": counter.layer_index, "dropped": counter.dropped, "modes": modes}
+                    {
+                        "layer": counter.layer_index,
+                        "dropped": counter.dropped,
+                        "modes": modes,
+                    }
                 )
             groups[key] = {**info, "num_layers": len(members), "layers": layers}
         none = [0] * len(LOAD_MODES)

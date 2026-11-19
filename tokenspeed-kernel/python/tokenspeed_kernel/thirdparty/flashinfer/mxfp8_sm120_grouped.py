@@ -220,7 +220,12 @@ def quantize_fp8_group32_grouped(
 
 class _GroupedGemm:
     def __init__(
-        self, tile: tuple[int, int], groups: int, max_active_clusters: int, *, enable_pdl
+        self,
+        tile: tuple[int, int],
+        groups: int,
+        max_active_clusters: int,
+        *,
+        enable_pdl,
     ):
         self.groups = groups
         self.max_active_clusters = max_active_clusters
@@ -286,10 +291,16 @@ def _compiled_grouped(
     with torch.cuda.device(device):
         m, n, k = cute.sym_int(), cute.sym_int(), cute.sym_int()
         a = cute.runtime.make_fake_compact_tensor(
-            cutlass.Float8E4M3FN, (m, groups, k), stride_order=(2, 1, 0), assumed_align=32
+            cutlass.Float8E4M3FN,
+            (m, groups, k),
+            stride_order=(2, 1, 0),
+            assumed_align=32,
         )
         b = cute.runtime.make_fake_compact_tensor(
-            cutlass.Float8E4M3FN, (groups, n, k), stride_order=(2, 1, 0), assumed_align=32
+            cutlass.Float8E4M3FN,
+            (groups, n, k),
+            stride_order=(2, 1, 0),
+            assumed_align=32,
         )
         c = cute.runtime.make_fake_compact_tensor(
             cutlass.BFloat16, (m, groups, n), stride_order=(2, 1, 0), assumed_align=16

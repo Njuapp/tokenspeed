@@ -366,7 +366,9 @@ def _score_query_pair(
     col = tile * B + i
     visible = tl.where(tl.arange(0, 2) == 0, visible_a, visible_b)
     page_ok = tl.where(i < 64, ok0, ok1)
-    valid = (col[None, :] < WIDTH) & (col[None, :] < visible[:, None]) & page_ok[None, :]
+    valid = (
+        (col[None, :] < WIDTH) & (col[None, :] < visible[:, None]) & page_ok[None, :]
+    )
     dots = (
         tl.dot_scaled(
             q_codes,
@@ -529,8 +531,20 @@ def _index_score_pair_history_tiles(
                 127,
             )
             scores = _score_query_pair(
-                q_codes, q_scales, weights, visible_a, visible_b, key_codes,
-                key_scales, ok0, ok1, tile, WIDTH, SHARD_HEADS, SHARDS, B,
+                q_codes,
+                q_scales,
+                weights,
+                visible_a,
+                visible_b,
+                key_codes,
+                key_scales,
+                ok0,
+                ok1,
+                tile,
+                WIDTH,
+                SHARD_HEADS,
+                SHARDS,
+                B,
             )
             cols = c0 + i
             tl.store(

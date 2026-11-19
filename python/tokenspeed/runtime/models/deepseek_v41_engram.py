@@ -877,9 +877,7 @@ class EngramHostPrefetcher:
         # "clip" keeps an id outside the table inside it; the lookup zeroes the
         # row of such an id whatever was gathered for it.
         ids = table.host_ids[start:stop]
-        np.take(
-            table.codes, ids, axis=0, out=table.host_codes[start:stop], mode="clip"
-        )
+        np.take(table.codes, ids, axis=0, out=table.host_codes[start:stop], mode="clip")
         np.take(
             table.scales, ids, axis=0, out=table.host_scales[start:stop], mode="clip"
         )
