@@ -38,6 +38,9 @@ Integration contract:
   ``shared`` keeps one full copy per node and skips the lookup all-reduce.
   ``sharded`` keeps a host shard per attention-TP rank and retains the all-reduce.
   ``auto`` selects sharded when attention TP > 1. Output matches the GPU path.
+  With TOKENSPEED_ENGRAM_HOST_PREFETCH=1 a pure-prefill forward over a shared
+  host table gathers the rows on host threads and uploads them with one copy
+  per table (EngramHostPrefetcher); every other case keeps the UVA gather.
 * Intercept embed.weight/scale BEFORE a generic GPU weight iterator. Open the
   safetensors file on CPU, pass get_slice(name) to embed.load_sharded(), and mark
   the corresponding runtime parameter name loaded. GPU and host-sharded tables
@@ -53,13 +56,19 @@ Integration contract:
 from __future__ import annotations
 
 import atexit
+import collections
 import ctypes
 import ctypes.util
 import os
+import queue
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import weakref
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import wait as wait_futures
 from dataclasses import dataclass
 
 import numpy as np
@@ -464,6 +473,487 @@ def _dequant_fp8_e8m0(codes: torch.Tensor, scales: torch.Tensor) -> torch.Tensor
     )
 
 
+# TOKENSPEED_ENGRAM_HOST_PREFETCH=1 replaces the UVA row gather of a shared host
+# table in pure-prefill forwards. Read once per process; unset or any other
+# value keeps the UVA gather everywhere. See EngramHostPrefetcher.
+ENGRAM_HOST_PREFETCH_ENV = "TOKENSPEED_ENGRAM_HOST_PREFETCH"
+# Host gather threads per process (the helper thread comes on top). Eight
+# gather 2048 x 24 rows of the 98 GB table in 0.5 ms; sixteen were slower.
+ENGRAM_HOST_PREFETCH_THREADS_ENV = "TOKENSPEED_ENGRAM_HOST_PREFETCH_THREADS"
+_PREFETCH_DEFAULT_THREADS = 8
+# Below this many rows the UVA gather is cheap and the forward reaches the
+# Engram layer before a helper thread could have delivered.
+_PREFETCH_MIN_ROWS = 256
+# Longest time the forward thread waits for the helper at the Engram layer
+# before it runs the UVA gather itself. The helper normally finishes while the
+# layers in front of the first Engram layer are still being queued.
+_PREFETCH_WAIT_SECONDS = 0.02
+_PREFETCH_POLL_SECONDS = 5.0e-5
+# Lookups between two reports of the counters.
+_PREFETCH_LOG_INTERVAL = 2048
+# Back-off. When this many of the last _PREFETCH_MISS_WINDOW lookups were not
+# delivered by the helper (late, failed, or staging still owned by an abandoned
+# lookup), the following lookups skip the prefetch, so the forward neither
+# submits nor waits. A late lookup costs up to _PREFETCH_WAIT_SECONDS and a
+# delivered one saves about 3 ms, so a miss rate near one in five is a loss;
+# a window, not a run, also catches a first Engram layer that is late in every
+# forward while the second one is delivered.
+_PREFETCH_MAX_MISSES = 3
+_PREFETCH_MISS_WINDOW = 16
+# Length of the first pause in lookups. Every further pause is twice as long,
+# up to the maximum, until a whole window of lookups was delivered again.
+_PREFETCH_PAUSE_LOOKUPS = 256
+_PREFETCH_MAX_PAUSE_LOOKUPS = 65536
+
+
+def engram_host_prefetch_requested() -> bool:
+    return os.environ.get(ENGRAM_HOST_PREFETCH_ENV, "") == "1"
+
+
+def _wait_cuda_event(event: torch.cuda.Event) -> None:
+    """Wait for a CUDA event from a helper thread without holding the GIL.
+
+    The calling thread must be bound to the event's device: the query takes
+    no device, and a thread that never selected one would use device 0.
+    """
+    while not event.query():
+        time.sleep(_PREFETCH_POLL_SECONDS)
+
+
+class _EngramPrefetchTable:
+    """One host table pair and its pinned staging, owned by one embedding."""
+
+    def __init__(self, codes: torch.Tensor, scales: torch.Tensor):
+        # NumPy views of the host tables: np.take releases the GIL and has no
+        # thread pool of its own, so the gather threads below set the parallelism.
+        self.codes = codes.detach().numpy()
+        self.scales = scales.detach().numpy()
+        self.codes_ptr = codes.data_ptr()
+        self.scales_ptr = scales.data_ptr()
+        self.rows = int(codes.shape[0])
+        self.capacity = 0
+        self.ids: torch.Tensor | None = None
+        self.stage_codes: torch.Tensor | None = None
+        self.stage_scales: torch.Tensor | None = None
+        # NumPy views of the three staging buffers for the gather threads.
+        self.host_ids: np.ndarray | None = None
+        self.host_codes: np.ndarray | None = None
+        self.host_scales: np.ndarray | None = None
+        # The last job that used the staging buffers. They are free for the
+        # next one once that job's upload has run; only the forward thread
+        # reads and writes this field.
+        self.owner: _EngramPrefetchJob | None = None
+
+    def reserve(self, count: int, device: torch.device) -> None:
+        """Grow the pinned id and staging buffers; only while no job owns them.
+
+        The buffers are page-locked through ``device``'s context, the one the
+        readback and the uploads run in. They are created outside inference
+        mode whatever mode the calling forward is in: the gather threads fill
+        them, and a tensor created in inference mode must not be written from
+        a thread that is not in it.
+        """
+        if count <= self.capacity:
+            return
+        capacity = max(count, 2 * self.capacity)
+        with torch.inference_mode(False), torch.cuda.device(device):
+            self.ids = torch.empty(capacity, dtype=torch.int64).pin_memory()
+            self.stage_codes = torch.empty(
+                (capacity, self.codes.shape[1]), dtype=torch.uint8
+            ).pin_memory()
+            self.stage_scales = torch.empty(
+                (capacity, self.scales.shape[1]), dtype=torch.uint8
+            ).pin_memory()
+        self.host_ids = self.ids.numpy()
+        self.host_codes = self.stage_codes.numpy()
+        self.host_scales = self.stage_scales.numpy()
+        self.capacity = capacity
+
+
+class _EngramPrefetchJob:
+    """Rows of one Engram lookup on their way from the host table to the device."""
+
+    def __init__(
+        self,
+        table: _EngramPrefetchTable,
+        key: tuple,
+        count: int,
+        ids_event: torch.cuda.Event,
+        codes: torch.Tensor,
+        scales: torch.Tensor,
+        ids: torch.Tensor,
+    ):
+        self.table = table
+        self.key = key
+        self.count = count
+        self.ids_event = ids_event
+        # Destinations of the upload: written by the helper thread only, read
+        # by the forward thread only after ``done_event``.
+        self.codes = codes
+        self.scales = scales
+        # Device copy of the ids the rows are gathered for, made by the forward
+        # thread when it queued the readback and never written again. The
+        # lookup compares it with its own ids.
+        self.ids = ids
+        # Recorded on the helper's stream behind the uploads, and set before
+        # ``ready``: the job has left the staging and its destinations are
+        # complete when this event has happened.
+        self.done_event: torch.cuda.Event | None = None
+        self.ready = threading.Event()
+        self.error: BaseException | None = None
+
+
+class EngramHostPrefetcher:
+    """Host-side gather of Engram rows for pure-prefill forwards.
+
+    The UVA gather kernel pays about 30 ns per random host row, 3 ms of the
+    forward stream per Engram layer at 2048 tokens, for 13 MB of data. Here the
+    forward thread only queues an asynchronous readback of the row ids when the
+    forward starts. A helper thread waits for that readback, gathers codes and
+    scales from the host table into pinned staging with a few worker threads,
+    and uploads them on its own stream. At the Engram layer the forward stream
+    waits for that upload through a CUDA event.
+
+    For every id inside the table the bytes are those the UVA kernel reads; an
+    id outside it gathers some row here and row 0 there, and the lookup zeroes
+    that row on both paths. The lookup does not rely on the job belonging to
+    its forward: it compares a device copy of the ids the rows were gathered
+    for with its own and reads every row that differs through UVA, so a job
+    from another forward costs time and cannot change the result.
+
+    Threads. The forward thread may run in inference mode, which is
+    thread-local; the helper and gather threads never do. They write only the
+    pinned staging and the two device destinations of a job, all created
+    outside inference mode, and no tensor that the forward thread created in
+    its own mode. The forward thread reads a job's destinations only after the
+    helper's completion event. The helper and gather threads take the GIL a
+    few times per lookup and hold it for microseconds: the ids need no host
+    arithmetic, and each gather thread makes two NumPy calls that release it.
+
+    One prefetcher serves one device. Its helper thread binds itself to that
+    device and to its own stream before any CUDA call; the gather threads make
+    no CUDA calls. The forward thread never synchronizes with the device: it
+    waits on the helper for at most ``_PREFETCH_WAIT_SECONDS`` (while the
+    layers in front of the Engram layer are still executing) and otherwise
+    runs the UVA gather. When ``_PREFETCH_MAX_MISSES`` of the last
+    ``_PREFETCH_MISS_WINDOW`` lookups were not delivered, the next
+    ``_PREFETCH_PAUSE_LOOKUPS`` lookups skip the prefetch without waiting; the
+    pause doubles each time until a whole window is delivered again. Host
+    tables are only read; a shared file mapping needs no other handling.
+    Pinned memory: 272 bytes per gathered row and table.
+    """
+
+    def __init__(self, device: torch.device, threads: int):
+        if device.type != "cuda" or device.index is None:
+            raise ValueError("The Engram host prefetcher needs an indexed CUDA device")
+        self.device = device
+        self.stream = torch.cuda.Stream(device)
+        self.threads = threads
+        self.jobs: queue.SimpleQueue[_EngramPrefetchJob] = queue.SimpleQueue()
+        # Helper thread only: jobs whose upload may still be running. They keep
+        # the pinned staging and the device destinations alive until it has
+        # run, also when the forward and the table have dropped the job.
+        self.uploading: list[_EngramPrefetchJob] = []
+        self.pool = ThreadPoolExecutor(
+            max_workers=threads, thread_name_prefix="engram-gather"
+        )
+        # Counters. attempts: lookups that asked for a prefetch; used: served
+        # by the helper; late and failed: the forward ran the UVA gather after
+        # waiting; busy: staging still owned by an abandoned lookup; skipped:
+        # not submitted during a pause.
+        self.attempts = 0
+        self.submitted = 0
+        self.used = 0
+        self.late = 0
+        self.failed = 0
+        self.busy = 0
+        self.skipped = 0
+        self.pauses = 0
+        self.waited_seconds = 0.0
+        self.gather_seconds = 0.0
+        # Back-off state, forward thread only: 1 for every recent lookup the
+        # helper did not deliver, 0 for a delivered one.
+        self.recent: collections.deque[int] = collections.deque(
+            maxlen=_PREFETCH_MISS_WINDOW
+        )
+        self.pause_left = 0
+        self.next_pause = _PREFETCH_PAUSE_LOOKUPS
+        self.warned_late = False
+        self.warned_failed = False
+        self.thread = threading.Thread(
+            target=self._run, name=f"engram-prefetch-{device.index:d}", daemon=True
+        )
+        self.thread.start()
+
+    def submit(
+        self,
+        table: _EngramPrefetchTable,
+        indices: torch.Tensor,
+        key: tuple,
+    ) -> _EngramPrefetchJob | None:
+        """Queue the gather of the lookup's rows; forward thread, no waiting.
+
+        Args:
+            table: Host table pair of the calling embedding; this rank holds
+                every row of it from row 0.
+            indices: Int64 ids ``[rows, hash columns]`` of the lookup, on this
+                prefetcher's device.
+            key: Identity of the lookup, checked again when it is consumed.
+
+        Returns:
+            The job to pass to ``take``, or None when the lookup must use the
+            UVA gather: during a back-off pause, when the helper thread has
+            stopped, or when the table's staging is still owned by an earlier
+            job that the forward abandoned.
+        """
+        self.attempts += 1
+        if self.attempts % _PREFETCH_LOG_INTERVAL == 0:
+            logger.info(f"Engram host prefetch on {self.device}: {self._counters()}")
+        if self.pause_left > 0:
+            self.pause_left -= 1
+            self.skipped += 1
+            return None
+        if not self.thread.is_alive():
+            self.failed += 1
+            self._miss("failed", "the helper thread has stopped")
+            return None
+        if table.owner is not None and not self._finished(table.owner):
+            self.busy += 1
+            self._miss("late", "the staging is still owned by an earlier lookup")
+            return None
+        count = indices.numel()
+        device = self.device
+        table.reserve(count, device)
+        # Allocate the destinations before the id readback is queued: once the
+        # helper has seen the readback event, every earlier use of this device
+        # memory on the forward stream has run, so the upload on the helper's
+        # stream cannot overtake it. The helper thread writes them, so they
+        # are ordinary tensors also when this forward runs in inference mode:
+        # a tensor created in inference mode may only be written in that mode,
+        # which is a property of the forward thread alone.
+        with torch.inference_mode(False):
+            codes = torch.empty(
+                (*indices.shape, table.codes.shape[1]),
+                dtype=torch.uint8,
+                device=device,
+            )
+            scales = torch.empty(
+                (*indices.shape, table.scales.shape[1]),
+                dtype=torch.uint8,
+                device=device,
+            )
+        # The ids as they are now, contiguous: the rows are gathered for this
+        # copy, which only the forward thread ever touches, and the lookup
+        # compares it with the ids it is called with.
+        ids = indices.clone()
+        # Asynchronous readback of that copy into the pinned staging.
+        table.ids[:count].view(indices.shape).copy_(ids, non_blocking=True)
+        ids_event = torch.cuda.Event()
+        ids_event.record(torch.cuda.current_stream(device))
+        job = _EngramPrefetchJob(table, key, count, ids_event, codes, scales, ids)
+        table.owner = job
+        self.submitted += 1
+        self.jobs.put(job)
+        return job
+
+    def _finished(self, job: _EngramPrefetchJob) -> bool:
+        """Forward thread: has the helper left this job and has its upload run?"""
+        if not job.ready.is_set() or job.done_event is None:
+            return False
+        # An event query takes no device; make sure it runs in this one's context.
+        if torch.cuda.current_device() == self.device.index:
+            return job.done_event.query()
+        with torch.cuda.device(self.device):
+            return job.done_event.query()
+
+    def take(
+        self, job: _EngramPrefetchJob
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        """Return device codes, scales and the ids they belong to, or None.
+
+        The forward thread waits here for the helper thread only, never for the
+        device; the upload is ordered in front of the caller's next kernels by
+        a stream wait on its completion event. The caller must check the ids
+        against its own before it uses a row.
+        """
+        if not job.ready.is_set():
+            started = time.perf_counter()
+            arrived = job.ready.wait(_PREFETCH_WAIT_SECONDS)
+            self.waited_seconds += time.perf_counter() - started
+            if not arrived:
+                self.late += 1
+                self._miss("late", "the host gather was not ready in time")
+                return None
+        if job.error is not None:
+            self.failed += 1
+            self._miss("failed", f"the host gather failed: {job.error!r}")
+            return None
+        torch.cuda.current_stream(self.device).wait_event(job.done_event)
+        self.used += 1
+        self.recent.append(0)
+        if len(self.recent) == _PREFETCH_MISS_WINDOW and not any(self.recent):
+            self.next_pause = _PREFETCH_PAUSE_LOOKUPS
+        if self.used == 1:
+            logger.info(
+                f"Engram host prefetch on {self.device} is active: {self._counters()}"
+            )
+        return job.codes, job.scales, job.ids
+
+    def _miss(self, kind: str, reason: str) -> None:
+        """Count an undelivered lookup, warn once per kind and start a pause."""
+        if kind == "late" and not self.warned_late:
+            self.warned_late = True
+            logger.warning(
+                f"Engram host prefetch on {self.device} used the UVA gather: "
+                f"{reason} (first late lookup; later ones are only counted)"
+            )
+        if kind == "failed" and not self.warned_failed:
+            self.warned_failed = True
+            logger.warning(
+                f"Engram host prefetch on {self.device} used the UVA gather: "
+                f"{reason} (first failed lookup; later ones are only counted)"
+            )
+        self.recent.append(1)
+        if sum(self.recent) < _PREFETCH_MAX_MISSES:
+            return
+        window = len(self.recent)
+        self.recent.clear()
+        self.pauses += 1
+        self.pause_left = self.next_pause
+        logger.warning(
+            f"Engram host prefetch on {self.device} backs off: "
+            f"{_PREFETCH_MAX_MISSES:d} of the last {window:d} lookups were not delivered "
+            f"(last: {reason}); the next {self.pause_left:d} lookups use the UVA "
+            f"gather without waiting (pause {self.pauses:d}). {self._counters()}"
+        )
+        self.next_pause = min(2 * self.next_pause, _PREFETCH_MAX_PAUSE_LOOKUPS)
+
+    def _counters(self) -> str:
+        return (
+            f"{self.attempts:d} lookups, used {self.used:d}, late {self.late:d}, "
+            f"failed {self.failed:d}, busy {self.busy:d}, skipped in pauses "
+            f"{self.skipped:d}, pauses {self.pauses:d}, forward waited "
+            f"{1e3 * self.waited_seconds:.1f} ms in total, host gather "
+            f"{1e3 * self.gather_seconds / max(self.submitted, 1):.2f} ms per lookup "
+            f"({self.threads:d} threads)"
+        )
+
+    def _run(self) -> None:
+        # A new thread starts on CUDA device 0. Bind it to this prefetcher's
+        # device and stream first: every later call (event queries, uploads)
+        # then stays in the rank's own context, and no context is created on
+        # a GPU that belongs to another rank.
+        torch.cuda.set_device(self.device)
+        torch.cuda.set_stream(self.stream)
+        while True:
+            self._serve(self.jobs.get())
+
+    def _serve(self, job: _EngramPrefetchJob) -> None:
+        # Drop the jobs whose upload has run; the new one stays referenced
+        # here until a later call finds its upload finished.
+        self.uploading = [
+            old
+            for old in self.uploading
+            if old.done_event is None or not old.done_event.query()
+        ]
+        self.uploading.append(job)
+        try:
+            self._process(job)
+        except BaseException as error:  # noqa: BLE001 - reported by take()
+            job.error = error
+            try:
+                # An upload queued before the failure still reads the staging
+                # and writes the job's destinations: the job is finished when
+                # this thread's stream has run everything queued on it so far.
+                done = torch.cuda.Event()
+                done.record(self.stream)
+                job.done_event = done
+            finally:
+                job.ready.set()
+
+    @staticmethod
+    def _take_rows(table: _EngramPrefetchTable, start: int, stop: int) -> None:
+        # Host memory only: the gather threads make no CUDA and no torch call.
+        # "clip" keeps an id outside the table inside it; the lookup zeroes the
+        # row of such an id whatever was gathered for it.
+        ids = table.host_ids[start:stop]
+        np.take(
+            table.codes, ids, axis=0, out=table.host_codes[start:stop], mode="clip"
+        )
+        np.take(
+            table.scales, ids, axis=0, out=table.host_scales[start:stop], mode="clip"
+        )
+
+    def _process(self, job: _EngramPrefetchJob) -> None:
+        table = job.table
+        count = job.count
+        # The ids have reached the host, and everything queued on the forward
+        # stream before them has run.
+        _wait_cuda_event(job.ids_event)
+        started = time.perf_counter()
+        step = max(1024, -(-count // self.threads))
+        pending = [
+            self.pool.submit(self._take_rows, table, start, min(start + step, count))
+            for start in range(0, count, step)
+        ]
+        # One wait for all gather threads, then their errors if any.
+        wait_futures(pending)
+        for future in pending:
+            future.result()
+        self.gather_seconds += time.perf_counter() - started
+        # Uploads run on this thread's current stream, which _run set to the
+        # prefetcher's own stream on its device.
+        job.codes.view(count, -1).copy_(table.stage_codes[:count], non_blocking=True)
+        job.scales.view(count, -1).copy_(table.stage_scales[:count], non_blocking=True)
+        done = torch.cuda.Event()
+        done.record(self.stream)
+        job.done_event = done
+        # The helper does not wait for the upload: the staging stays with this
+        # job until the forward thread sees ``done`` (submit), and the job
+        # stays referenced by ``uploading``.
+        job.ready.set()
+
+    def stats(self) -> dict[str, float]:
+        """Counters since start, for logs and benchmarks."""
+        return {
+            "attempts": self.attempts,
+            "submitted": self.submitted,
+            "used": self.used,
+            "late": self.late,
+            "failed": self.failed,
+            "busy": self.busy,
+            "skipped": self.skipped,
+            "pauses": self.pauses,
+            "pause_left": self.pause_left,
+            "waited_seconds": self.waited_seconds,
+            "gather_seconds": self.gather_seconds,
+        }
+
+
+_ENGRAM_HOST_PREFETCHERS: dict[torch.device, EngramHostPrefetcher] = {}
+
+
+def engram_host_prefetcher(device: torch.device) -> EngramHostPrefetcher:
+    """Return the process-wide prefetcher of a device, starting it on first use."""
+    prefetcher = _ENGRAM_HOST_PREFETCHERS.get(device)
+    if prefetcher is None:
+        threads = int(
+            os.environ.get(ENGRAM_HOST_PREFETCH_THREADS_ENV, _PREFETCH_DEFAULT_THREADS)
+        )
+        if threads < 1:
+            raise ValueError(f"{ENGRAM_HOST_PREFETCH_THREADS_ENV} must be positive")
+        prefetcher = EngramHostPrefetcher(device, threads)
+        _ENGRAM_HOST_PREFETCHERS[device] = prefetcher
+    return prefetcher
+
+
+def _engram_lookup_key(indices: torch.Tensor) -> tuple:
+    # A cheap filter only. The hash ids live in a pointer-stable input buffer,
+    # so two forwards with the same row count have the same key; the lookup
+    # therefore verifies every prefetched row against its ids on the device.
+    return (indices.data_ptr(), tuple(indices.shape), indices.stride(), indices.device)
+
+
 class RowShardedEngramEmbedding(nn.Module):
     """FP8 codes and raw E8M0 scale bytes, GPU-sharded or host-resident."""
 
@@ -501,6 +991,13 @@ class RowShardedEngramEmbedding(nn.Module):
         self.layer_id = layer_id
         self._mmap_keep: list[object] = []
         self._host_gpu_registered = False
+        # TOKENSPEED_ENGRAM_HOST_PREFETCH: the pending host gather of this
+        # forward, and the host-table views it reads (built on first use).
+        self._host_prefetch = (
+            host_table and host_layout == "shared" and engram_host_prefetch_requested()
+        )
+        self._prefetch_table: _EngramPrefetchTable | None = None
+        self._prefetch_job: _EngramPrefetchJob | None = None
         row_sharded = (not host_table) or host_layout == "sharded"
         if row_sharded:
             self.part_num_embeddings = (
@@ -678,6 +1175,54 @@ class RowShardedEngramEmbedding(nn.Module):
                 raise ValueError("Open Engram safetensors on CPU before slicing")
             self._copy_rows(param, rows, start - self.row_start)
 
+    def prefetch(self, indices: torch.Tensor) -> None:
+        """Start the host gather for the ``forward(indices)`` of this forward.
+
+        Call it when a pure-prefill, eager forward starts, with the tensor the
+        later ``forward`` receives. It never waits. It is a no-op unless
+        TOKENSPEED_ENGRAM_HOST_PREFETCH=1 selected it for a shared host table
+        (this rank then holds every row, from row 0), the ids are a device
+        [rows, hash columns] tensor with enough rows, the prefetcher is not in
+        a back-off pause and no earlier job still owns this table's staging.
+        """
+        self._prefetch_job = None
+        if (
+            not self._host_prefetch
+            or self.row_start != 0
+            or not indices.is_cuda
+            or indices.ndim != 2
+            or indices.dtype != torch.int64
+            or indices.shape[0] < _PREFETCH_MIN_ROWS
+            or torch.cuda.is_current_stream_capturing()
+        ):
+            return
+        codes = self.weight.detach().view(torch.uint8)
+        table = self._prefetch_table
+        if (
+            table is None
+            or table.codes_ptr != codes.data_ptr()
+            or table.scales_ptr != self.scale.data_ptr()
+        ):
+            table = _EngramPrefetchTable(codes, self.scale)
+            self._prefetch_table = table
+        self._prefetch_job = engram_host_prefetcher(indices.device).submit(
+            table, indices, _engram_lookup_key(indices)
+        )
+
+    def _take_prefetched(
+        self, indices: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        job = self._prefetch_job
+        self._prefetch_job = None
+        if (
+            job is None
+            or job.key != _engram_lookup_key(indices)
+            # A captured lookup must not hold a prefetched buffer as a constant.
+            or torch.cuda.is_current_stream_capturing()
+        ):
+            return None
+        return engram_host_prefetcher(indices.device).take(job)
+
     def forward(
         self, indices: torch.Tensor, *, query_shard: QueryShardPlan | None
     ) -> torch.Tensor:
@@ -719,10 +1264,37 @@ class RowShardedEngramEmbedding(nn.Module):
             local = (indices >= self.row_start) & (indices < self.row_end)
             local_ids = (indices - self.row_start).masked_fill(~local, 0)
             if self.host_table:
-                codes = host_gather.uint8_row_gather(
-                    self.weight.view(torch.uint8), local_ids, None
-                )
-                scales = host_gather.uint8_row_gather(self.scale, local_ids, None)
+                prefetched = self._take_prefetched(indices)
+                if prefetched is None:
+                    codes = host_gather.uint8_row_gather(
+                        self.weight.view(torch.uint8), local_ids, None
+                    )
+                    scales = host_gather.uint8_row_gather(self.scale, local_ids, None)
+                else:
+                    # Same bytes, gathered on the host and uploaded once. A row
+                    # is right only if it was gathered for this lookup's id, and
+                    # the job cannot prove which forward it belongs to, so every
+                    # row is checked here. Rows whose id differs (none, unless
+                    # the job is from another forward) are read through UVA; an
+                    # id of -1 makes that kernel write zeros without a host
+                    # read, so the check costs two launches that read nothing.
+                    # A row whose id is outside the table is zeroed below.
+                    codes, scales, gathered_ids = prefetched
+                    stale = gathered_ids != indices
+                    again = local_ids.masked_fill(~stale, -1)
+                    stale = stale.unsqueeze(-1)
+                    codes = torch.where(
+                        stale,
+                        host_gather.uint8_row_gather(
+                            self.weight.view(torch.uint8), again, None
+                        ),
+                        codes,
+                    )
+                    scales = torch.where(
+                        stale,
+                        host_gather.uint8_row_gather(self.scale, again, None),
+                        scales,
+                    )
                 values = _dequant_fp8_e8m0(codes, scales)
             else:
                 local_ids = local_ids.long()
@@ -879,6 +1451,25 @@ class DeepseekV41Engram(nn.Module):
             for source, target in names.items()
         }
 
+    def prefetch(self, hash_ids: torch.Tensor) -> None:
+        """Start this layer's host-table gather early; see the embedding."""
+        self.embed.prefetch(hash_ids)
+
+    def lookup_is_local(self) -> bool:
+        """Whether ``lookup`` runs without a collective on this rank."""
+        embed = self.embed
+        return len(embed.tp_group) <= 1 or embed.host_layout == "shared"
+
+    def lookup(self, hash_ids: torch.Tensor) -> torch.Tensor:
+        """The embeddings ``forward`` gathers for ``hash_ids``, without a shard.
+
+        They depend on the hash ids only, so a caller may compute them ahead
+        of the layer (on another stream) and hand them to ``forward`` as
+        ``embeddings``: the same kernels on the same inputs, bit-identical.
+        Requires ``lookup_is_local()``.
+        """
+        return self.embed(hash_ids, query_shard=None).flatten(-2)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -886,6 +1477,7 @@ class DeepseekV41Engram(nn.Module):
         token_mask: torch.Tensor,
         *,
         query_shard: QueryShardPlan | None,
+        embeddings: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Inject Engram into [..., 4, hidden_size], returning the same shape/dtype.
 
@@ -904,7 +1496,13 @@ class DeepseekV41Engram(nn.Module):
             raise TypeError("Engram token mask must be bool")
         if hidden_states.numel() == 0 and query_shard is None:
             return hidden_states
-        embeddings = self.embed(hash_ids, query_shard=query_shard).flatten(-2)
+        if embeddings is None:
+            embeddings = self.embed(hash_ids, query_shard=query_shard).flatten(-2)
+        elif query_shard is not None or embeddings.shape != (
+            *shape,
+            self.wkv.input_size,
+        ):
+            raise ValueError("Engram embeddings computed ahead must match the rows")
         if hidden_states.numel() == 0:
             return hidden_states
         kv, _ = self.wkv(embeddings, block_scale=None, output_dtype=None)

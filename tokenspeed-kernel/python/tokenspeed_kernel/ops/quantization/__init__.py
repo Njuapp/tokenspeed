@@ -106,6 +106,37 @@ def rmsnorm_quantize_fp8_group32(
     return kernel(x, weight, eps)
 
 
+def rmsnorm_quantize_fp8_group32_swizzled(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``rmsnorm_quantize_fp8_group32`` for the SM120 prepacked MXFP8 GEMM.
+
+    The normalized rows and the codes are those of
+    ``rmsnorm_quantize_fp8_group32(solution="triton")`` bit for bit. The scales
+    come back as the dense 1-D uint8 F8_128x4 tensor ``mm(prepacked_scales=True)``
+    takes for E4M3 activations, so no per-call swizzle (a fill, a slice copy
+    and a transposing copy) runs in front of the GEMM. They cannot be indexed
+    by row: callers that select or slice rows need the canonical layout.
+
+    Args:
+        x: BF16 rows ``[M, K]`` with unit inner stride; K divisible by 32.
+        weight: Contiguous BF16 RMSNorm weight ``[K]`` on x's device.
+        eps: Positive epsilon added to the row mean square.
+
+    Returns:
+        BF16 normalized rows ``[M, K]``, E4M3 codes ``[M, K]`` and uint8 UE8M0
+        scales in the F8_128x4 layout,
+        ``[ceil(M / 128) * 128 * ceil(K / 128) * 4]``.
+    """
+    from tokenspeed_kernel.ops.quantization.triton import (
+        rmsnorm_fp8_group32_ue8m0_swizzled,
+    )
+
+    return rmsnorm_fp8_group32_ue8m0_swizzled(x, weight, eps)
+
+
 def silu_and_mul_quantize_fp8_group32(
     x: torch.Tensor, limit: float | None
 ) -> tuple[torch.Tensor, torch.Tensor]:

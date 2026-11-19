@@ -1880,3 +1880,127 @@ register_triton_warmup(
     _fp8_group32_ue8m0_quantize_swizzled,
     variants=({"GROUPS": (4, 16, 32, 64)},),
 )
+
+
+# ---------------------------------------------------------------------------
+# RMSNorm + group-32 quantization with the scales already in the prepared
+# GEMM's F8_128x4 layout (opt-in, used by the runtime only under
+# TOKENSPEED_SM120_RMSNORM_SWIZZLED_SCALES=1).
+# ---------------------------------------------------------------------------
+
+
+@triton.jit(do_not_specialize=["M", "X0"])
+def _rmsnorm_fp8_group32_ue8m0_swizzled(
+    X,
+    W,
+    N,
+    Q,
+    S,
+    M,
+    X0,
+    K: tl.constexpr,
+    EPS: tl.constexpr,
+    BLOCK: tl.constexpr,
+    ZERO_BLOCK: tl.constexpr,
+):
+    # _rmsnorm_fp8_group32_ue8m0 with one difference: the UE8M0 scale bytes go
+    # to their F8_128x4 offsets, and the layout's padding is zeroed, in this
+    # launch. Keep the row arithmetic of the two bodies in step: the normalized
+    # rows and the codes must stay bit-identical.
+    pid = tl.program_id(0).to(tl.int64)
+    k_tiles = tl.cdiv(K, 128)
+    if pid < M:
+        row = pid
+        col = tl.arange(0, BLOCK)
+        x = tl.load(X + row * X0 + col, col < K, 0).to(tl.float32)
+        w = tl.load(W + col, col < K, 0).to(tl.float32)
+        inv = tl.rsqrt(tl.sum(x * x, 0) / K + EPS)
+        normalized = (x * inv * w).to(N.dtype.element_ty)
+        tl.store(N + row * K + col, normalized, col < K)
+        values = tl.reshape(normalized.to(tl.float32), (BLOCK // 32, 32))
+        raw = tl.maximum(tl.max(tl.abs(values), 1), 1e-4) * (1.0 / 448.0)
+        bits = raw.to(tl.int32, bitcast=True)
+        exponent = ((bits >> 23) & 255) + ((bits & 0x7FFFFF) != 0).to(tl.int32)
+        quantized = tl.reshape(
+            values * (1.0 / (exponent << 23).to(tl.float32, bitcast=True))[:, None],
+            (BLOCK,),
+        ).to(tl.float8e4nv)
+        tl.store(Q + row * K + col, quantized, col < K)
+        groups = tl.arange(0, BLOCK // 32)
+        scale_offset = _fp8_swizzled_scale_offset(row, groups, k_tiles)
+        tl.store(S + scale_offset, exponent.to(tl.uint8), groups < K // 32)
+
+    # Padding writes have disjoint addresses from all live scale stores. Each
+    # program owns a fixed slice, so no memset/copy or cross-CTA barrier is
+    # needed (same scheme as _fp8_group32_ue8m0_quantize_swizzled).
+    if M % 128 != 0 or K % 128 != 0:
+        padded_columns = k_tiles * 4
+        index = pid * ZERO_BLOCK + tl.arange(0, ZERO_BLOCK)
+        pad_row, pad_column = index // padded_columns, index % padded_columns
+        padding = (index < tl.cdiv(M, 128) * 128 * padded_columns) & (
+            (pad_row >= M) | (pad_column >= K // 32)
+        )
+        offset = _fp8_swizzled_scale_offset(pad_row, pad_column, k_tiles)
+        tl.store(S + offset, 0, padding)
+
+
+def rmsnorm_fp8_group32_ue8m0_swizzled(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``triton_rmsnorm_fp8_group32_ue8m0`` with F8_128x4 activation scales.
+
+    Args:
+        x: BF16 rows ``[M, K]`` with unit inner stride; K divisible by 32.
+        weight: Contiguous BF16 RMSNorm weight ``[K]`` on x's device.
+        eps: Positive epsilon added to the row mean square.
+
+    Returns:
+        BF16 normalized rows ``[M, K]`` and E4M3 codes ``[M, K]``, bit-identical
+        to ``triton_rmsnorm_fp8_group32_ue8m0``, and the same UE8M0 scale bytes
+        as a dense 1-D uint8 tensor in FlashInfer's F8_128x4 layout, equal to
+        ``swizzle_mxfp8_scale(canonical_scales, M, K)`` byte for byte. The row
+        count is the launch grid and a runtime argument: one compiled kernel
+        serves every M, and the launch is safe under CUDA graph capture.
+    """
+    if (
+        x.ndim != 2
+        or not x.is_cuda
+        or x.dtype != torch.bfloat16
+        or x.shape[1] <= 0
+        or x.shape[1] % 32
+        or x.stride(1) != 1
+        or weight.shape != (x.shape[1],)
+        or not weight.is_contiguous()
+        or weight.dtype != x.dtype
+        or weight.device != x.device
+        or eps <= 0
+    ):
+        raise ValueError("Expected BF16 [M,K] input and [K] weight, K divisible by 32")
+    m, k = x.shape
+    normalized = torch.empty_like(x, memory_format=torch.contiguous_format)
+    quantized = torch.empty((m, k), dtype=torch.float8_e4m3fn, device=x.device)
+    scale_count = triton.cdiv(m, 128) * 128 * triton.cdiv(k, 128) * 4
+    scales = torch.empty((scale_count,), dtype=torch.uint8, device=x.device)
+    if m:
+        zero_block = 256
+        programs = max(m, triton.cdiv(scale_count, zero_block))
+        _rmsnorm_fp8_group32_ue8m0_swizzled[(programs,)](
+            x,
+            weight,
+            normalized,
+            quantized,
+            scales,
+            m,
+            x.stride(0),
+            k,
+            eps,
+            triton.next_power_of_2(k),
+            zero_block,
+            # The warp count fixes the order of the mean-square reduction; it
+            # must stay that of triton_rmsnorm_fp8_group32_ue8m0.
+            num_warps=4,
+            enable_fp_fusion=False,
+        )
+    return normalized, quantized, scales

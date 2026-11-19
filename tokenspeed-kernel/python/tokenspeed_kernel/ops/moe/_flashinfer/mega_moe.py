@@ -28,6 +28,7 @@ from dataclasses import dataclass
 import torch
 from tokenspeed_kernel.ops.moe._deep_gemm.mega_moe_stage import (
     stage_mxfp4_mega_moe_inputs,
+    stage_mxfp4_mega_moe_inputs_placed,
 )
 
 # The MXFP4 MegaMoE kernels share one checkpoint layout and one gate/up row
@@ -338,24 +339,63 @@ def flashinfer_mxfp4_mega_moe_run(
             )
         warmup_flashinfer_mxfp4_mega_moe(plan, w)
     buffers = _get_staging_buffers(state.device, capacity, w.hidden_size, w.top_k)
+    # A permuted expert placement (plan["expert_id_map"], int32 logical id ->
+    # slot): the weights were loaded into the placed slots, so the ids the
+    # kernel receives must name slots. The staging launch maps them.
+    expert_id_map = plan.get("expert_id_map")
     # Staging widens ids to int64; one input dtype keeps one compile.
-    stage_mxfp4_mega_moe_inputs(
-        x,
-        topk_weights,
-        topk_ids.to(torch.int32),
-        buffers.x_fp8[:num_tokens],
-        buffers.x_scale[:num_tokens],
-        buffers.topk_ids[:num_tokens],
-        buffers.topk_weights[:num_tokens],
-    )
+    if expert_id_map is None:
+        stage_mxfp4_mega_moe_inputs(
+            x,
+            topk_weights,
+            topk_ids.to(torch.int32),
+            buffers.x_fp8[:num_tokens],
+            buffers.x_scale[:num_tokens],
+            buffers.topk_ids[:num_tokens],
+            buffers.topk_weights[:num_tokens],
+        )
+    else:
+        # The map is indexed by logical expert id and names slots; replicas
+        # make the slots (w.num_experts) more than the logical experts.
+        if expert_id_map.shape[0] > w.num_experts:
+            raise ValueError(
+                f"expert_id_map covers {expert_id_map.shape[0]} experts, the "
+                f"layer holds only {w.num_experts} slots"
+            )
+        stage_mxfp4_mega_moe_inputs_placed(
+            x,
+            topk_weights,
+            topk_ids.to(torch.int32),
+            buffers.x_fp8[:num_tokens],
+            buffers.x_scale[:num_tokens],
+            buffers.topk_ids[:num_tokens],
+            buffers.topk_weights[:num_tokens],
+            expert_id_map,
+        )
     output = torch.empty_like(x, dtype=torch.bfloat16)
-    mega_moe_sm120.run(
-        state.layer,
-        buffers.x_fp8[:num_tokens],
-        buffers.x_scale[:num_tokens].view(torch.uint8),
-        buffers.topk_ids[:num_tokens],
-        buffers.topk_weights[:num_tokens],
-        max_tokens_per_rank=max_num_tokens_per_gpu,
-        output=output,
-    )
+    # plan["before_kernel_launch"]: optional callback a caller arms for one
+    # forward, run once the inputs are staged and before the kernel launch
+    # (see mega_moe_sm120.run). Absent by default.
+    before_launch = plan.get("before_kernel_launch")
+    if before_launch is None:
+        mega_moe_sm120.run(
+            state.layer,
+            buffers.x_fp8[:num_tokens],
+            buffers.x_scale[:num_tokens].view(torch.uint8),
+            buffers.topk_ids[:num_tokens],
+            buffers.topk_weights[:num_tokens],
+            max_tokens_per_rank=max_num_tokens_per_gpu,
+            output=output,
+        )
+    else:
+        mega_moe_sm120.run(
+            state.layer,
+            buffers.x_fp8[:num_tokens],
+            buffers.x_scale[:num_tokens].view(torch.uint8),
+            buffers.topk_ids[:num_tokens],
+            buffers.topk_weights[:num_tokens],
+            max_tokens_per_rank=max_num_tokens_per_gpu,
+            output=output,
+            before_launch=before_launch,
+        )
     return output

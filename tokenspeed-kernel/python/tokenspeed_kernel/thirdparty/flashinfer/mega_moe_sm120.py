@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib.util
+from collections.abc import Callable
 from pathlib import Path
 
 import torch
@@ -280,6 +281,7 @@ def run(
     *,
     max_tokens_per_rank: int | None,
     output: torch.Tensor,
+    before_launch: Callable[[], None] | None = None,
 ) -> None:
     """Launch the kernel on this rank's rows. Collective over the EP group.
 
@@ -294,11 +296,18 @@ def run(
             and can be captured into a CUDA graph. None makes the kernel
             all-gather the row counts and read them back on the host.
         output: BF16 ``[rows, hidden]`` to receive this rank's rows.
+        before_launch: Optional callback, run on the calling stream after the
+            inputs are staged into the kernel's workspace and before the
+            kernel is launched. Work it submits to other streams is ordered
+            in front of the kernel launch without depending on it. None (the
+            default) changes nothing.
     """
     layer.stage_inputs(
         _tensors(x_fp8, x_scale, topk_ids, topk_weights),
         compile_tokens_per_rank=max_tokens_per_rank,
     )
+    if before_launch is not None:
+        before_launch()
     layer.compute_staged(output=output)
 
 

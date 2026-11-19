@@ -22,6 +22,7 @@
 config, its cache geometry and groups, the cache ops a plan carries and
 their acknowledgments, and the block tables a forward reads."""
 
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, NamedTuple
@@ -528,6 +529,47 @@ def cache_ops_from_plan(execution_plan) -> CacheOperations:
     return CacheOperations(tuple(device), tuple(storage))
 
 
+# Opt-in experiment switch, read once: "1" issues the per-step upload of the
+# packed block tables on a stream of its own instead of the caller's stream.
+# The scheduler prepares a decode step while the previous step's graph still
+# runs, so on the caller's stream the copy (about 3 MB per decode step at long
+# contexts) executes between two graphs and holds the next one back; on its own
+# stream it executes as soon as it is issued and the caller's stream only waits
+# for it. Same bytes, same device tensor layout. Unset or any other value keeps
+# the upload on the caller's stream.
+_BLOCK_TABLE_UPLOAD_STREAM = (
+    os.environ.get("TOKENSPEED_BLOCK_TABLE_UPLOAD_STREAM", "0") == "1"
+)
+_block_table_upload_streams: dict[int, torch.cuda.Stream] = {}
+
+
+def _upload_packed_block_tables(
+    staged: torch.Tensor, device: torch.device
+) -> torch.Tensor:
+    """Copy the pinned stage to ``device`` for consumers on the current stream."""
+    if not (
+        _BLOCK_TABLE_UPLOAD_STREAM
+        and device.type == "cuda"
+        and staged.is_pinned()
+        and not torch.cuda.is_current_stream_capturing()
+    ):
+        return staged.to(device, non_blocking=True)
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    consumer = torch.cuda.current_stream(index)
+    stream = _block_table_upload_streams.get(index)
+    if stream is None:
+        stream = torch.cuda.Stream(device=index)
+        _block_table_upload_streams[index] = stream
+    with torch.cuda.stream(stream):
+        packed = staged.to(device, non_blocking=True)
+    # Everything the caller submits from here on runs after the copy, and the
+    # device block is not reused before the caller's stream has drained what it
+    # had queued when the tables are released.
+    consumer.wait_stream(stream)
+    packed.record_stream(consumer)
+    return packed
+
+
 class PackedBlockTables(NamedTuple):
     """One batch's per-group block tables, staged once and uploaded once.
 
@@ -708,7 +750,7 @@ def packed_block_tables_from_forward_op(
     staged_np = staged.numpy()
     for key, arr, offset in packable:
         np.copyto(staged_np[offset : offset + arr.size].reshape(arr.shape), arr)
-    packed = staged.to(device, non_blocking=True)
+    packed = _upload_packed_block_tables(staged, device)
     for key, arr, offset in packable:
         out[key] = packed[offset : offset + arr.size].view(arr.shape[0], arr.shape[1])
         out_cpu[key] = staged[offset : offset + arr.size].view(

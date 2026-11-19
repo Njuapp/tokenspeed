@@ -31,6 +31,7 @@ CPU reference.
 
 from __future__ import annotations
 
+import os
 import re
 from copy import copy
 from dataclasses import dataclass, replace
@@ -64,6 +65,11 @@ from tokenspeed.runtime.models.deepseek_v41 import (
 from tokenspeed.runtime.models.deepseek_v41_dspark_heads import DSparkVanillaMarkov
 from tokenspeed.runtime.models.target_capture import TargetCaptureConfigurator
 from tokenspeed.runtime.utils import add_prefix
+
+# Experiment switch, off by default; deepseek_v41.py rejects other values.
+_SM120_LM_HEAD_MXFP8_DRAFT = (
+    os.environ.get("TOKENSPEED_SM120_LM_HEAD_MXFP8", "") == "draft"
+)
 
 
 def _quantized_kv(x: torch.Tensor) -> torch.Tensor:
@@ -252,9 +258,25 @@ class DeepseekV41DSparkModel(DeepseekV41Model):
         if flat.is_cuda and current_platform().is_cdna5:
             logits = dsv4_linear_fp32(flat, head, override=None, solution=None)
         elif flat.is_cuda:
-            # dsv4_linear_fp32's NVIDIA kernels are router GEMMs sized for
-            # expert counts, not a vocabulary shard.
-            logits = torch.mm(flat, head.T, out_dtype=torch.float32)
+            logits = None
+            if _SM120_LM_HEAD_MXFP8_DRAFT and flat.shape[0]:
+                # TOKENSPEED_SM120_LM_HEAD_MXFP8: the head's MXFP8 copy, FP16
+                # logits widened to the FP32 the block sampler reads. Every
+                # proposal is still verified against the target's logits.
+                from tokenspeed_kernel.thirdparty.flashinfer.mxfp8_sm120_lm_head import (
+                    mxfp8_lm_head,
+                    mxfp8_lm_head_logits,
+                )
+
+                prepared = mxfp8_lm_head(head)
+                if prepared is not None:
+                    logits = mxfp8_lm_head_logits(
+                        flat, prepared, torch.float16
+                    ).float()
+            if logits is None:
+                # dsv4_linear_fp32's NVIDIA kernels are router GEMMs sized for
+                # expert counts, not a vocabulary shard.
+                logits = torch.mm(flat, head.T, out_dtype=torch.float32)
         else:
             logits = flat.float() @ head.float().T
         return logits.view(*hidden_states.shape[:-1], head.shape[0])
@@ -457,6 +479,10 @@ class DeepseekV41DSparkModel(DeepseekV41Model):
 class DeepseekV41ForCausalLMDSpark(DeepseekV41ForCausalLM, TargetCaptureConfigurator):
     """Strict mtp-only adapter sharing embedding/head with its V4.1 target."""
 
+    # A placement file describes the target's routed experts; the draft's own
+    # experts stay contiguous.
+    expert_placement_supported = False
+
     def configure_target(self, target_model, target_config) -> None:
         """Install the checkpoint's target taps before draft execution exists."""
         del target_config
@@ -488,6 +514,10 @@ class DeepseekV41ForCausalLMDSpark(DeepseekV41ForCausalLM, TargetCaptureConfigur
 
     def get_hot_token_id(self):
         return None
+
+    # The head is the target's tensor, bound after loading (set_embed_and_head);
+    # its MXFP8 copy, when enabled, is the one the target prepared.
+    _sm120_lm_head_owner = False
 
     def set_embed_and_head(self, embed, head) -> None:
         self.model.embed_tokens.weight = embed

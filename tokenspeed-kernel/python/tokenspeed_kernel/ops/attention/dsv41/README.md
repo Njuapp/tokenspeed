@@ -35,6 +35,42 @@ per-tile key conversion. The dot result still rounds to BF16 before head
 weighting. Scoring reduces each contiguous head shard once. It retains each
 shard's rounding boundary and adds the partial scores in rank order.
 
+## SM120 grouped index scoring (opt-in)
+
+`TOKENSPEED_SM120_DSV41_INDEX_GROUPED=1`, read once when `flashinfer.py` is
+imported, changes how `flashinfer_dsv41_index_topk` scores Full tiles of eight
+or more queries and how it stores scores. Unset, or set to anything else, the
+kernel is unchanged. The selected IDs are the same either way.
+
+A program owns one query pair and walks several history tiles with the pair's
+packed queries loaded once: up to 16 tiles for a broadcast page table, up to 8
+when rows carry their own tables. The tile count is a launch argument derived
+from the query and table shapes so that a launch keeps about 2000 programs;
+no shape compiles a new program. A tile's two pages are read as two table
+entries. The tile arithmetic is that of the per-tile kernels: the same
+64 x 128 MXFP4 product, BF16 dot rounding, BF16 weighted products, FP32 head
+sum in the same order and per-shard rounding. Every score has the same bits.
+
+For rows with their own page tables, the pair launch tests once per program
+that the pair's two table rows agree on every page the second query can see
+in the program's tiles, records the answer for each tile, and scores the pair
+when it holds. A second launch scores the remaining tiles query by query. Its
+programs cover up to 16 tiles and return after one flag read when none is
+left, so the launch costs a few microseconds when every pair shares. A pair
+that agrees on only some tiles of a program is scored per query for all of
+them, with identical scores.
+
+Scores are rounded to the head-weight dtype. With BF16 weights the score and
+block-score matrices are stored as BF16, which holds every score exactly, and
+native TopK selects on 16-bit keys with the same smaller-ID tie rule. FP32
+weights keep FP32 matrices. The query-tile bound still counts four bytes per
+score, so query tiles are those of the unset path.
+
+Reindex, tiles of fewer than eight queries, score tiles below 128 rows and
+tables wider than the native selector's limit keep their kernels. Graph replay
+reads updated page tables, visible lengths and query values; grids and tile
+counts depend on shapes only.
+
 ## Datacenter native selection
 
 The native Blackwell DeepGEMM indexer writes BF16 logits and passes BF16 rows
@@ -110,3 +146,37 @@ Page-table widths, visible lengths, and physical slots remain runtime data.
 The split count uses four occupancy buckets. Compact prefill workspaces and
 V4 cache layouts keep the portable implementation. Cache ownership and writes
 remain unchanged.
+
+## SM120 paged decode attention (opt-in FlashInfer kernels)
+
+`TOKENSPEED_SM120_DSV41_ATTENTION_FLASHINFER=1`, read once when
+`flashinfer.py` is imported, registers
+`flashinfer_dsv41_selected_attention_sm120` above the Triton SM120 reader for
+`dsv41_selected_attention` on NVIDIA compute capability 12.0. Unset, or set to
+anything else, nothing is registered and selection is unchanged.
+
+The kernel calls FlashInfer's generated sm_120a mixed-cache family, which
+reads the same page-planar fields in place (528-byte FP8 SWA rows, 288-byte
+FP4 global rows), keeps Q in BF16 and widens the rows exactly on chip. One
+launch covers every query row. FlashInfer's planner, a function of the row
+count, head count, selection widths and SM count, may split a row's
+candidates across CTAs; the kernel then allocates the BF16/FP32 split
+partials for the invocation and FlashInfer adds one merge launch. Outputs
+agree with the Triton reader to BF16 rounding: probabilities are rounded to
+BF16 before PV.
+
+FlashInfer masks negative slots and slots past a row's length but does not
+scan slots against the field. Only calls that carry a schedule are served:
+the runtime's paged decode, whose slot producers bound every slot by the
+field's pages. The Triton reader keeps every other call, with the same
+arguments: compact workspaces (prefill, the DSpark window), calls without a
+schedule, a requested LSE, head counts outside 8, 16, 32, 48, 64, 80, 96, 112
+and 128, cache views that are not 16-byte aligned V4.1 pages, and a first use
+inside a graph capture. Each reason other than a workspace is logged once.
+
+The family is built with nvcc, or loaded from FlashInfer's JIT cache, when
+the module is imported with the switch on. The first eager call per device
+and head count launches the window-only reader, the window+global reader and
+the merge once on zero rows, so a later capture records kernels the driver
+has already loaded. Capture reads only shapes; replay reads the live slots,
+lengths, sink, query and cache bytes.

@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import os
 from functools import cache
 
 import torch
@@ -2022,6 +2023,11 @@ def triton_mhc_mixes_sm120(
             residual, weight, scale, base, rms_eps, hc_eps, sinkhorn_iters
         )
     if tokens > 16:
+        if sm120_mhc_fused_mode() == "min64":
+            # TOKENSPEED_SM120_MHC_FUSED=2: at least 64 projection splits.
+            return _mhc_mixes_tensor_sm120_min_splits(
+                residual, weight, scale, base, rms_eps, hc_eps, sinkhorn_iters, 64
+            )
         # BF16 activations remain exact; TF32x3 retains the FP32 weight.
         return _mhc_mixes_impl(
             residual,
@@ -2241,3 +2247,235 @@ def normalized_dot_gate(residual, key_value, query_weight, key_weight, mask, eps
 
 # Preserve the fast single-split specialization; all other counts share a key.
 register_triton_warmup(_mhc_pre_mix_hc4_kernel, variants=({"n_splits": (1, 2)},))
+
+
+# ===-----------------------------------------------------------------------===#
+# SM120 fused mHC boundary (TOKENSPEED_SM120_MHC_FUSED)
+# ===-----------------------------------------------------------------------===#
+#
+# TOKENSPEED_SM120_MHC_FUSED, read once per process, honoured on SM120 only.
+# Unset, empty or "0" keeps the separate kernels and split counts.
+#   1: fuse the HC post with the next layer input and its RMSNorm
+#      (mhc_post_input_norm_hc4). Results are bit-identical.
+#   2: as 1, and the mixing projection of more than 128 rows uses 64 splits,
+#      the count it already uses for 65-128 rows, instead of 32/16/8/4/2/1.
+#      Each split's accumulator chain is then five tiles long, which is faster,
+#      and the partials are summed in that grouping: the next coefficients
+#      change in their low-order bits (same precision, other summation order).
+SM120_MHC_FUSED_ENV = "TOKENSPEED_SM120_MHC_FUSED"
+_SM120_MHC_FUSED_MODES = {"": None, "0": None, "1": "exact", "2": "min64"}
+
+
+@cache
+def sm120_mhc_fused_mode() -> str | None:
+    """Return "exact", "min64" or None (off) for the fused SM120 mHC boundary."""
+    value = os.environ.get(SM120_MHC_FUSED_ENV, "")
+    if value not in _SM120_MHC_FUSED_MODES:
+        raise ValueError(
+            f"{SM120_MHC_FUSED_ENV} accepts 1 (fused post and layer input), 2 (also "
+            f"at least 64 projection splits) or unset/0; got {value!r}"
+        )
+    platform = current_platform()
+    if not (platform.is_nvidia and platform.arch_version == ArchVersion(12, 0)):
+        return None
+    return _SM120_MHC_FUSED_MODES[value]
+
+
+def _mhc_mixes_tensor_sm120_min_splits(
+    residual, weight, scale, base, rms_eps, hc_eps, sinkhorn_iters, min_splits
+):
+    """``_mhc_mixes_impl`` on the SM120 tensor path with a lower bound on splits."""
+    tokens, _, hidden = residual.shape
+    splits = max(
+        compute_mhc_num_splits(
+            residual.device, 64, 4 * hidden, max(1, triton.cdiv(tokens, 64))
+        ),
+        min_splits,
+    )
+    # The legacy coefficient reducer indexes its partial buffer in int32.
+    if splits * tokens * 24 >= 1 << 31:
+        raise ValueError("mHC partial buffer exceeds the reducer's int32 index bound")
+    projection = torch.empty(
+        (splits, tokens, 24), device=residual.device, dtype=torch.float32
+    )
+    square_sum = torch.empty(
+        (splits, tokens), device=residual.device, dtype=torch.float32
+    )
+    pre = torch.empty((tokens, 4), device=residual.device, dtype=torch.float32)
+    post = torch.empty_like(pre)
+    comb = torch.empty((tokens, 4, 4), device=residual.device, dtype=torch.float32)
+    _mhc_prenorm_tensor_sm120(
+        residual.view(tokens, 4 * hidden), weight, projection, square_sum, splits
+    )
+    mhc_pre_mix_hc4(
+        projection,
+        square_sum,
+        scale,
+        base,
+        pre,
+        post,
+        comb,
+        hidden_size=hidden,
+        rms_eps=rms_eps,
+        hc_eps=hc_eps,
+        sinkhorn_iters=sinkhorn_iters,
+        n_splits=splits,
+        num_tokens=tokens,
+    )
+    return pre, post, comb
+
+
+# After a sublayer the model runs _mhc_post_hc4_triton_kernel (read and write
+# of the [T, 4, 5120] residual) and then _mhc_pre_layer_norm_hc4_kernel (a
+# second read of the new residual) to get the next layer input. The kernel
+# below produces both results from one read and one write. It keeps the
+# arithmetic of the two kernels:
+#   * new residual: FP32 post product, four FMAs in input-stream order, one
+#     round to BF16;
+#   * layer input: FP32 sum over the four streams of pre-mix times the
+#     BF16-rounded new residual, one round to BF16, then RMSNorm with the same
+#     one-CTA-per-token variance reduction (same tensor shape and warp count).
+# The mixing projection stays the separate kernel on whichever stream the
+# model uses for it today. No cross-CTA barriers and no host-visible state, so
+# CUDA graph capture and replay are safe. The row count is the launch grid.
+
+
+@triton.jit
+def _mhc_post_input_norm_hc4_kernel(
+    comb,
+    residual,
+    post,
+    pre_mix,
+    hidden_states,
+    weight,
+    out_residual,
+    out_input,
+    hidden_size: tl.constexpr,
+    eps: tl.constexpr,
+    block_h: tl.constexpr,
+    ENABLE_PDL: tl.constexpr,
+):
+    if ENABLE_PDL:
+        tl.extra.cuda.gdc_wait()
+    token_id = tl.program_id(0).to(tl.int64)
+    hidden_offsets = tl.arange(0, block_h)
+    hidden_mask = hidden_offsets < hidden_size
+    residual_base = token_id * 4 * hidden_size
+
+    hidden_values = tl.load(
+        hidden_states + token_id * hidden_size + hidden_offsets,
+        mask=hidden_mask,
+        other=0.0,
+    ).to(tl.float32)
+    layer_input = tl.zeros((block_h,), tl.float32)
+    # One output stream at a time keeps a row's live values within the
+    # register file: the input streams are reloaded (L1 hits) for each output.
+    for out_hc in tl.static_range(0, 4):
+        acc = tl.load(post + token_id * 4 + out_hc).to(tl.float32) * hidden_values
+        # Explicit FMA in input-stream order, as _mhc_post_hc4_triton_kernel.
+        for in_hc in tl.static_range(0, 4):
+            residual_values = tl.load(
+                residual + residual_base + in_hc * hidden_size + hidden_offsets,
+                mask=hidden_mask,
+                other=0.0,
+            ).to(tl.float32)
+            acc = tl.fma(
+                tl.load(comb + token_id * 16 + in_hc * 4 + out_hc).to(tl.float32),
+                residual_values,
+                acc,
+            )
+        new_residual = acc.to(tl.bfloat16)
+        tl.store(
+            out_residual + residual_base + out_hc * hidden_size + hidden_offsets,
+            new_residual,
+            mask=hidden_mask,
+        )
+        pre = tl.load(pre_mix + token_id * 4 + out_hc).to(tl.float32)
+        layer_input += pre * new_residual.to(tl.float32)
+
+    # From here on this is _mhc_pre_layer_norm_hc4_kernel.
+    layer_input = layer_input.to(tl.bfloat16).to(tl.float32)
+    variance = tl.sum(layer_input * layer_input, axis=0) / hidden_size
+    norm_scale = tl.rsqrt(variance + eps)
+    norm_weight = tl.load(weight + hidden_offsets, mask=hidden_mask, other=0.0).to(
+        tl.float32
+    )
+    tl.store(
+        out_input + token_id * hidden_size + hidden_offsets,
+        layer_input * norm_scale * norm_weight,
+        mask=hidden_mask,
+    )
+    if ENABLE_PDL:
+        tl.extra.cuda.gdc_launch_dependents()
+
+
+def mhc_post_input_norm_hc4(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    pre: torch.Tensor,
+    post: torch.Tensor,
+    comb: torch.Tensor,
+    norm_weight: torch.Tensor,
+    norm_eps: float,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Fuse the HC post with the next layer input and its RMSNorm (hc=4, H=5120).
+
+    Args:
+        x: Contiguous BF16 sublayer output [T, 5120].
+        residual: Contiguous BF16 residual before that sublayer [T, 4, 5120].
+        pre: Contiguous FP32 previous pre-mix [T, 4] that collapses the new
+            residual into the layer input.
+        post: Contiguous FP32 sublayer output mix [T, 4].
+        comb: Contiguous FP32 residual mix [T, 4, 4], input then output stream.
+        norm_weight: Contiguous BF16 or FP32 input RMSNorm weight [5120].
+        norm_eps: Input RMSNorm epsilon.
+
+    Returns:
+        The new BF16 residual [T, 4, 5120] and the BF16 normalized layer input
+        [T, 5120], bit-identical to ``mhc_post`` followed by ``mhc_apply_pre``
+        with the norm; or None when the layout is not this one and the caller
+        must run the separate kernels. Inputs are never mutated.
+    """
+    if (
+        residual.ndim != 3
+        or residual.shape[1] != 4
+        or residual.shape[2] != 5120
+        or residual.shape[0] == 0
+        or x.shape != (residual.shape[0], 5120)
+        or pre.shape != (residual.shape[0], 4)
+        or post.shape != (residual.shape[0], 4)
+        or comb.shape != (residual.shape[0], 4, 4)
+        or norm_weight.shape != (5120,)
+        or residual.dtype != torch.bfloat16
+        or x.dtype != torch.bfloat16
+        or any(t.dtype != torch.float32 for t in (pre, post, comb))
+        or norm_weight.dtype not in (torch.bfloat16, torch.float32)
+        or not all(
+            t.is_cuda and t.is_contiguous()
+            for t in (x, residual, pre, post, comb, norm_weight)
+        )
+    ):
+        return None
+    tokens, _, hidden = residual.shape
+    out_residual = torch.empty_like(residual)
+    out_input = torch.empty((tokens, hidden), device=x.device, dtype=x.dtype)
+    enable_pdl = pdl_enabled()
+    _mhc_post_input_norm_hc4_kernel[(tokens,)](
+        comb,
+        residual,
+        post,
+        pre,
+        x,
+        norm_weight,
+        out_residual,
+        out_input,
+        hidden_size=hidden,
+        eps=norm_eps,
+        block_h=triton.next_power_of_2(hidden),
+        ENABLE_PDL=enable_pdl,
+        # The warp count fixes the order of the variance reduction; it must
+        # stay that of mhc_pre_layer_norm_hc4.
+        num_warps=8,
+        **({"launch_pdl": True} if enable_pdl else {}),
+    )
+    return out_residual, out_input

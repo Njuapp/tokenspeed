@@ -43,11 +43,13 @@ holds (``V41Metadata.global_write_floor``).
 """
 
 import logging
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import NamedTuple
 
 import torch
+from tokenspeed_kernel.ops.attention.dsv4 import prefill_attention_override
 from tokenspeed_kernel.ops.attention.dsv4._triton.dcp import normalize_dcp_partials
 
 from tokenspeed.runtime.configs.model_config import AttentionArch
@@ -91,6 +93,50 @@ from tokenspeed.runtime.layers.attention.query_partition import InterleavedQuery
 from tokenspeed.runtime.layers.attention.registry import register_backend
 from tokenspeed.runtime.layers.paged_attention import QueryShardGather
 from tokenspeed.runtime.utils.host_sync import allow_host_sync
+
+# Experiment gate, off unless TOKENSPEED_SKIP_UNREAD_HISTORY_WORKSPACE=1 (read
+# once at import). Under query context parallelism a rank builds one attention
+# workspace per request of the chunk, including requests none of whose query
+# rows it owns; with the gate on, forward_v41 skips those before building them.
+_SKIP_UNREAD_HISTORY_WORKSPACE = (
+    os.environ.get("TOKENSPEED_SKIP_UNREAD_HISTORY_WORKSPACE") == "1"
+)
+
+# Two more prefill experiment gates, read once at import and off unless set to
+# 1. Neither changes a value forward_v41 returns or writes.
+#   TOKENSPEED_PREFILL_ATTN_SKIP_ZERO_FILL=1
+#       The prefill output starts uninitialized instead of zero-filled when the
+#       request row ranges are consecutive slices covering every output row:
+#       each attention launch then overwrites all of its rows.
+#   TOKENSPEED_PREFILL_GATHER_SELECTED_HISTORY=1
+#       A request whose local query rows selected at most three quarters as
+#       many global rows as its visible history holds dequantizes only the
+#       selected rows into the workspace (decoder layers: tens of query rows
+#       against a history of about 129k rows). The attention reads the same
+#       row values in the same column order. Without KVP only.
+_SKIP_PREFILL_OUTPUT_ZERO_FILL = (
+    os.environ.get("TOKENSPEED_PREFILL_ATTN_SKIP_ZERO_FILL") == "1"
+)
+_GATHER_SELECTED_HISTORY = (
+    os.environ.get("TOKENSPEED_PREFILL_GATHER_SELECTED_HISTORY") == "1"
+)
+
+
+def _requests_cover_rows(requests, total: int) -> bool:
+    """Whether the requests' row ranges are consecutive slices tiling [0, total)."""
+    stop = 0
+    for request in requests:
+        rows = request.rows
+        if (
+            not isinstance(rows, slice)
+            or rows.step not in (None, 1)
+            or rows.start != stop
+            or rows.stop is None
+            or rows.stop < stop
+        ):
+            return False
+        stop = rows.stop
+    return stop == total
 
 # Initial long-prefill thresholds; tune with query count and visible history.
 _INDEXER_PARTITION_MIN_QUERIES = 4096
@@ -2336,9 +2382,31 @@ class DeepseekV41AttentionBackend(AttentionBackend):
                 logical_rows = record.logical_rows[selected.clamp_min(0)].masked_fill(
                     selected[:, None] < 0, -1
                 )
-        out = torch.zeros_like(q)
+        # Every iteration below that owns rows writes all of them (the two
+        # `continue`s are taken only for an empty range), so a full tiling
+        # leaves nothing for the zero fill to define.
+        out = (
+            torch.empty_like(q)
+            if _SKIP_PREFILL_OUTPUT_ZERO_FILL
+            and _requests_cover_rows(plan.requests, q.shape[0])
+            else torch.zeros_like(q)
+        )
         for request_plan, prefix in zip(plan.requests, prefixes, strict=True):
             rows = request_plan.rows
+            if (
+                _SKIP_UNREAD_HISTORY_WORKSPACE
+                and key_rows is not None
+                and rows.start == rows.stop
+                and (owner < 0 or self.kvp_size == 1)
+            ):
+                # The same empty-shard test as the `continue` below, taken
+                # before the workspace exists: this rank owns no query row of
+                # the request, so nothing would read its workspace. What is
+                # skipped only allocates, copies and reads cache rows. The KV
+                # all-gather and the SWA publish sit outside this loop and still
+                # run. With KVP the history gather is a collective every owner
+                # must join, so that case keeps the full path.
+                continue
             prefix_count = request_plan.prefix_slots.numel()
             current_rows = current[
                 (
@@ -2358,11 +2426,55 @@ class DeepseekV41AttentionBackend(AttentionBackend):
                 if owner >= 0 and self.kvp_size > 1
                 else (history_slots.numel() if history_slots is not None else 0)
             )
-            workspace = current.new_empty((swa_count + history_count, 512))
+            # The history rows the workspace holds: all visible ones, or, under
+            # the gate, only those this request's local queries selected when
+            # that is at most three quarters as many (the selected gather adds
+            # a slot lookup, so near parity the dense one is as fast).
+            # `selected` is then the per-query logical rows.
+            selected = None
+            if _GATHER_SELECTED_HISTORY and history_slots is not None:
+                selected = logical_rows[rows]
+                if not 0 < 4 * selected.numel() <= 3 * history_count:
+                    selected = None
+            workspace = current.new_empty(
+                (
+                    swa_count
+                    + (history_count if selected is None else selected.numel()),
+                    512,
+                )
+            )
             workspace[:prefix_count].copy_(prefix)
             workspace[prefix_count:swa_count].copy_(current_rows)
             indices = request_plan.swa_indices
-            if owner >= 0:
+            if selected is not None:
+                # Entry e of `selected` gets workspace row swa_count + e, the
+                # dequantized row the dense workspace holds at swa_count +
+                # selected[e]. Entries the dense path leaves to the kernel's
+                # row-bound mask (>= history_count) are masked here.
+                live = (
+                    (selected >= 0)
+                    & (selected < history_count)
+                    & (global_slots[rows] >= 0)
+                )
+                dsv41.cache_gather(
+                    global_cache,
+                    history_slots[
+                        selected.clamp(0, history_count - 1).reshape(-1).long()
+                    ],
+                    self.global_format,
+                    workspace[swa_count:],
+                )
+                compact_rows = torch.arange(
+                    swa_count,
+                    swa_count + selected.numel(),
+                    device=selected.device,
+                    dtype=selected.dtype,
+                ).view_as(selected)
+                indices = torch.cat(
+                    (indices, torch.where(live, compact_rows, -1)), dim=-1
+                ).to(torch.int32)
+                del live, compact_rows
+            elif owner >= 0:
                 if self.kvp_size > 1:
                     packed = self._gather_kvp_history(
                         global_cache,
@@ -2423,36 +2535,44 @@ class DeepseekV41AttentionBackend(AttentionBackend):
                         f"local_heads={request_q.shape[1]}"
                     )
                     self._attention_exchange_layers.add(layer_id)
-                result = selected_prefill_with_head_exchange(
-                    request_q,
-                    workspace[:, None, :],
-                    indices,
-                    attn_sink,
-                    softmax_scale=softmax_scale,
-                    query_chunk_size=V41_PREFILL_QUERY_TILE,
-                    group=group,
-                    rank=self.spec.attention_query_rank,
-                )
+                # Prefill opt-in to the SM120 workspace-kernel variants
+                # (TOKENSPEED_SM120_PREFILL_ATTN_H32 / _PV; a no-op context at
+                # their defaults). The registry still selects the kernel: the
+                # context scopes a dsv4_prefill kernel override.
+                with prefill_attention_override():
+                    result = selected_prefill_with_head_exchange(
+                        request_q,
+                        workspace[:, None, :],
+                        indices,
+                        attn_sink,
+                        softmax_scale=softmax_scale,
+                        query_chunk_size=V41_PREFILL_QUERY_TILE,
+                        group=group,
+                        rank=self.spec.attention_query_rank,
+                    )
                 if output is not None:
                     output.copy_(result)
             else:
-                result = dsv41.selected_attention(
-                    request_q,
-                    cache,
-                    None,
-                    None,
-                    global_cache,
-                    None,
-                    None,
-                    attn_sink,
-                    softmax_scale,
-                    output,
-                    V41_PREFILL_QUERY_TILE,
-                    None,
-                    workspace[:, None, :],
-                    indices.contiguous(),
-                    lse=None,
-                )
+                # Same opt-in as above. Decode and the DSpark window attention
+                # never enter this context and keep the default kernel.
+                with prefill_attention_override():
+                    result = dsv41.selected_attention(
+                        request_q,
+                        cache,
+                        None,
+                        None,
+                        global_cache,
+                        None,
+                        None,
+                        attn_sink,
+                        softmax_scale,
+                        output,
+                        V41_PREFILL_QUERY_TILE,
+                        None,
+                        workspace[:, None, :],
+                        indices.contiguous(),
+                        lse=None,
+                    )
             if output is None:
                 out[rows] = result
             del workspace, current_rows, indices

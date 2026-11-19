@@ -2055,6 +2055,11 @@ def moe_plan(
         "supports_valid_token_mask": "valid_token_mask" in apply_spec.features,
         "weight_preprocessor": apply_spec.weight_preprocessor,
         "warmup": getattr(kernel.impl, "_tokenspeed_warmup", None),
+        # Hook of a MegaMoE kernel that can run one MXFP8 shared expert inside
+        # its launch (see README, "MegaMoE shared expert"); None otherwise.
+        "fuse_shared_expert": getattr(
+            kernel.impl, "_tokenspeed_fuse_shared_expert", None
+        ),
         "a2a_backend": a2a_backend,
         "process_group": process_group,
         "deepep_mode": deepep_mode or "auto",

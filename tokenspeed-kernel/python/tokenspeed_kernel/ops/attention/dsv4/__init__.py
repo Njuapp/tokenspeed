@@ -20,9 +20,11 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager, nullcontext
+
 import torch
 from tokenspeed_kernel.profiling import ShapeCapture, kernel_scope
-from tokenspeed_kernel.selection import select_kernel
+from tokenspeed_kernel.selection import kernel_override, select_kernel
 from tokenspeed_kernel.signature import dense_tensor_format, format_signature
 
 
@@ -158,6 +160,32 @@ def dsv4_prefill(
         )
 
 
+def prefill_attention_override() -> AbstractContextManager[None]:
+    """Scope in which ``dsv4_prefill`` runs the opt-in SM120 prefill variant.
+
+    When ``TOKENSPEED_SM120_PREFILL_ATTN_H32`` or
+    ``TOKENSPEED_SM120_PREFILL_ATTN_PV`` selects a variant on an SM120 device,
+    every ``dsv4_prefill`` selection made inside the returned context resolves
+    to ``triton_dsv4_prefill_variant_sm120``, which itself hands requests it
+    does not serve to ``triton_dsv4_prefill_sm120``. Otherwise the context
+    does nothing. Prefill callers enter it around their attention launch;
+    callers that never enter it, such as the DSpark window attention inside
+    decode graphs, keep the default kernel whatever the variables say. The
+    override is process-wide while the context is open, so it must not span
+    work of another forward.
+
+    Returns:
+        A context manager; entering it yields None.
+    """
+    from tokenspeed_kernel.ops.attention.dsv4 import triton as triton_solution
+
+    if not triton_solution.PREFILL_VARIANT_ENABLED:
+        return nullcontext()
+    return kernel_override(
+        "attention", "dsv4_prefill", triton_solution.PREFILL_VARIANT_KERNEL
+    )
+
+
 # Backend registration (side-effect imports)
 # isort: off
 import tokenspeed_kernel.ops.attention.dsv4.cuda  # noqa: E402,F401
@@ -168,4 +196,5 @@ import tokenspeed_kernel.ops.attention.dsv4.gluon  # noqa: E402,F401
 
 __all__ = [
     "dsv4_prefill",
+    "prefill_attention_override",
 ]

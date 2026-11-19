@@ -841,6 +841,46 @@ def try_mhc_shifted_post_pre_norm(
     )
 
 
+def try_mhc_post_input_norm_sm120(
+    x: _torch.Tensor,
+    residual: _torch.Tensor,
+    pre: _torch.Tensor,
+    post: _torch.Tensor,
+    comb: _torch.Tensor,
+    norm_weight: _torch.Tensor,
+    norm_eps: float,
+) -> tuple[_torch.Tensor, _torch.Tensor] | None:
+    """SM120 fusion of the HC post with the next layer input and its RMSNorm.
+
+    Args:
+        x: Contiguous BF16 sublayer output [T,H].
+        residual: Contiguous BF16 residual before that sublayer [T,4,H].
+        pre: Contiguous FP32 previous pre-mix [T,4].
+        post: Contiguous FP32 sublayer output mix [T,4].
+        comb: Contiguous FP32 residual mix [T,4,4], input then output stream.
+        norm_weight: BF16 or FP32 input RMSNorm weight [H].
+        norm_eps: Input RMSNorm epsilon.
+
+    Returns:
+        The new BF16 residual [T,4,H] and the BF16 normalized layer input
+        [T,H], bit-identical to ``mhc_post`` followed by ``mhc_apply_pre`` with
+        the norm, from one pass over the residual instead of two. None unless
+        ``TOKENSPEED_SM120_MHC_FUSED`` enables it on an SM120 GPU and the
+        inputs are that hc=4, H=5120 layout; the caller then runs the separate
+        kernels. The next coefficients are not computed here, so the caller
+        keeps them on the stream it uses today. It has no cross-CTA barriers
+        and is safe under CUDA graph capture and replay.
+    """
+    from tokenspeed_kernel.ops.residual.triton import (
+        mhc_post_input_norm_hc4,
+        sm120_mhc_fused_mode,
+    )
+
+    if sm120_mhc_fused_mode() is None:
+        return None
+    return mhc_post_input_norm_hc4(x, residual, pre, post, comb, norm_weight, norm_eps)
+
+
 def mhc_apply_pre(
     residual: _torch.Tensor,
     pre: _torch.Tensor,
@@ -1173,6 +1213,7 @@ __all__ = [
     "post_norm_residual_pre_norm",
     "post_norm_residual_pre_norm_bf16",
     "residual_gate_coefficients",
+    "try_mhc_post_input_norm_sm120",
     "try_mhc_shifted_post_pre_norm",
 ]
 

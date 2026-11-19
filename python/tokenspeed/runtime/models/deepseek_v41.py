@@ -68,7 +68,7 @@ import logging
 import os
 import re
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from copy import copy
 from dataclasses import dataclass, replace
 from weakref import WeakValueDictionary
@@ -94,10 +94,12 @@ from tokenspeed_kernel.ops.moe import moe_topk
 from tokenspeed_kernel.ops.quantization import (
     quantize_fp8,
     rmsnorm_quantize_fp8_group32,
+    rmsnorm_quantize_fp8_group32_swizzled,
     silu_and_mul_quantize_fp8_group32,
 )
 from tokenspeed_kernel.ops.residual import (
     mhc_apply_pre_quantize_fp8,
+    try_mhc_post_input_norm_sm120,
     try_mhc_shifted_post_pre_norm,
 )
 from tokenspeed_kernel.platform import current_platform
@@ -171,6 +173,17 @@ from tokenspeed.runtime.models.deepseek_v41_engram import (
 )
 from tokenspeed.runtime.models.deepseek_v41_moe import DeepseekV4MoE
 from tokenspeed.runtime.models.deepseek_v41_vision import DeepseekV41Vision
+from tokenspeed.runtime.moe.ced_row_bound import (
+    MEGA_MOE_DECODER_ROW_BOUND_ENV,
+    ced_decoder_row_bound,
+    mega_moe_decoder_row_bound_requested,
+)
+from tokenspeed.runtime.moe.expert_file_placement import (
+    EXPERT_PLACEMENT_ENV,
+    FileExpertPlacement,
+    expert_placement_path,
+    load_expert_placement,
+)
 from tokenspeed.runtime.moe.expert_location import ModelConfigForExpertLocation
 from tokenspeed.runtime.multimodal.embedder import (
     EncoderSpec,
@@ -185,6 +198,70 @@ from tokenspeed.runtime.utils.cuda_stream import StreamFork
 from tokenspeed.runtime.utils.env import global_server_args_dict
 
 logger = logging.getLogger(__name__)
+
+# Set once the narrowed MegaMoE row bound (TOKENSPEED_MEGA_MOE_DECODER_ROW_BOUND)
+# first applies, so the log shows that and how the switch engaged.
+_FUSED_MOE_ROW_BOUND_LOGGED = False
+
+# Experiment switches, all off by default: with none set this module behaves
+# as before. Both change precision (FP8 group-32 activations where the
+# reference path keeps BF16), so they are separate from the equivalent track.
+#   TOKENSPEED_SM120_WO_A_MXFP8=1: keep wo_a's checkpoint FP8 codes next to the
+#     BF16 weight and run the grouped projection as one batched MXFP8 launch.
+#   TOKENSPEED_SM120_LM_HEAD_MXFP8=draft: MXFP8 copy of the LM head for the
+#     DSpark base logits. The verify pass always reads the BF16 head: no
+#     re-scoring scheme is provably identical to it, so no other value exists.
+_SM120_WO_A_MXFP8 = os.environ.get("TOKENSPEED_SM120_WO_A_MXFP8", "0") == "1"
+_SM120_LM_HEAD_MXFP8 = os.environ.get("TOKENSPEED_SM120_LM_HEAD_MXFP8", "")
+if _SM120_LM_HEAD_MXFP8 not in ("", "0", "draft"):
+    raise ValueError(
+        "TOKENSPEED_SM120_LM_HEAD_MXFP8 accepts only 'draft' (or unset/0): the "
+        "MXFP8 head serves the DSpark draft logits only. A verify-pass variant "
+        "is not implemented because it cannot be shown to return the tokens of "
+        f"the BF16 head; got {_SM120_LM_HEAD_MXFP8!r}"
+    )
+
+
+def _sm120_mxfp8_experiments_supported() -> bool:
+    """Whether the SM120 b12x MXFP8 kernels the switches rely on are usable."""
+    platform = current_platform()
+    if not (platform.is_nvidia and torch.cuda.is_available()):
+        return False
+    try:
+        from tokenspeed_kernel.ops.gemm.flashinfer import (
+            _sm120_mxfp8,
+            has_flashinfer_mxfp8,
+        )
+    except ImportError:
+        return False
+    return bool(_sm120_mxfp8 and has_flashinfer_mxfp8())
+
+# Decode small-item switches (r2-dsmall), all off by default and read once at
+# import: with none set this module behaves as before. Each is bit-identical.
+#   TOKENSPEED_SM120_RMSNORM_SWIZZLED_SCALES=1: in decode, q_norm's fused
+#     RMSNorm + FP8 quantizer writes its UE8M0 scales straight in the F8_128x4
+#     layout the prepacked wq_b / indexer wq_b GEMMs read, instead of canonical
+#     scales that every GEMM call swizzles again (a fill, a slice copy and a
+#     transposing copy: three graph nodes per call).
+#   TOKENSPEED_SM120_FFN_MIXES_AFTER_ROUTER=1: in decode with MegaMoE, the FFN's
+#     HC coefficients (hc stream) are submitted after the router GEMM instead of
+#     before it. They still only wait for the residual, but the router chain,
+#     which MegaMoE waits for, is launched first and is no longer slowed by the
+#     coefficient projection sharing its SMs.
+#   TOKENSPEED_ENGRAM_LOOKUP_UNDER_MEGAMOE=1: in decode with MegaMoE, an Engram
+#     layer's table lookup (masks, host gathers, dequantize) is forked onto its
+#     own stream when the previous layer's MegaMoE inputs are staged and runs
+#     while that MegaMoE runs; only wkv and the gate stay in front of the layer.
+_SM120_RMSNORM_SWIZZLED_SCALES = (
+    os.environ.get("TOKENSPEED_SM120_RMSNORM_SWIZZLED_SCALES", "0") == "1"
+)
+_SM120_FFN_MIXES_AFTER_ROUTER = (
+    os.environ.get("TOKENSPEED_SM120_FFN_MIXES_AFTER_ROUTER", "0") == "1"
+)
+_ENGRAM_LOOKUP_UNDER_MEGAMOE = (
+    os.environ.get("TOKENSPEED_ENGRAM_LOOKUP_UNDER_MEGAMOE", "0") == "1"
+)
+
 _ROPE_TABLES = WeakValueDictionary()
 
 
@@ -918,6 +995,12 @@ class DeepseekV41Attention(nn.Module):
         self.is_index_source = layer_id in config.index_source_layer_ids
         if self.is_kv_source and not self.is_index_source:
             raise ValueError("V4.1 KV owners must also own an indexer")
+        # (codes [G, R, K], scales) for the batched MXFP8 wo_a launch; None
+        # keeps the BF16 grouped projection. Plain attributes, not buffers: the
+        # module's state dict is unchanged. The fingerprint is of the BF16
+        # weight the codes were checked against.
+        self._wo_a_mxfp8: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._wo_a_mxfp8_fingerprint: tuple[int, int] | None = None
         self.attn_sink = nn.Parameter(
             torch.empty(self.n_local_heads, dtype=torch.float32), requires_grad=False
         )
@@ -987,11 +1070,128 @@ class DeepseekV41Attention(nn.Module):
         )
         self.rotary_emb = DeepseekV41RotaryEmbedding(config, self.compress_ratio)
 
+    def keep_wo_a_fp8(self, codes: torch.Tensor, scales: torch.Tensor) -> bool:
+        """Keep this rank's wo_a rows as MXFP8 for the batched projection.
+
+        Args:
+            codes: E4M3 ``[groups * rank, input]`` local rows.
+            scales: uint8 UE8M0 ``[groups * rank, input / 32]`` row scales.
+
+        Returns:
+            Whether the MXFP8 projection is now active for this layer. The
+            BF16 weight stays loaded for every case this path does not take.
+        """
+        device = self.wo_a.weight.device
+        if device.type != "cuda" or not _sm120_mxfp8_experiments_supported():
+            return False
+        if (
+            codes.shape[0] != self.n_local_groups * self.o_lora_rank
+            or codes.shape[1] % 128
+            or self.o_lora_rank % 128
+        ):
+            return False
+        from tokenspeed_kernel.thirdparty.flashinfer.mxfp8_sm120_grouped import (
+            prepare_grouped_mxfp8_weight,
+        )
+
+        packed = prepare_grouped_mxfp8_weight(
+            codes.to(device), scales.to(device), self.n_local_groups
+        )
+        if self._wo_a_mxfp8 is not None and all(
+            old.shape == new.shape for old, new in zip(self._wo_a_mxfp8, packed)
+        ):
+            # A reload refreshes in place: captured graphs retain the buffers.
+            for old, new in zip(self._wo_a_mxfp8, packed):
+                old.copy_(new)
+        else:
+            self._wo_a_mxfp8 = packed
+        self._wo_a_mxfp8_fingerprint = self._wo_a_weight_fingerprint()
+        return True
+
+    def _wo_a_weight_fingerprint(self) -> tuple[int, int]:
+        """Two wrapping sums over the BF16 weight's bits (load time only)."""
+        bits = self.wo_a.weight.detach().contiguous()
+        return (
+            int(bits.view(torch.int16).sum(dtype=torch.int64)),
+            int(bits.view(torch.int64).sum()),
+        )
+
+    def ensure_wo_a_fp8(self) -> bool:
+        """Derive the MXFP8 form from the BF16 weight when the loader did not
+        pass the checkpoint codes (a saved state, a BF16 checkpoint).
+
+        The weight is re-quantized row-wise in groups of 32 and kept only if
+        that reproduces every BF16 value exactly, which holds for weights
+        widened from FP8 codes with block scales. Codes kept for a BF16 weight
+        that has changed since (a loader that post-processes before copying
+        its state in) are rebuilt the same way.
+        """
+        weight = self.wo_a.weight
+        if weight.device.type != "cuda" or not _sm120_mxfp8_experiments_supported():
+            self._wo_a_mxfp8 = None
+            return False
+        if (
+            self._wo_a_mxfp8 is not None
+            and self._wo_a_mxfp8_fingerprint == self._wo_a_weight_fingerprint()
+        ):
+            return True
+        codes, scales = quantize_fp8(
+            weight.detach(),
+            granularity="token_group",
+            group_size=32,
+            scale_encoding="ue8m0",
+            enable_pdl=False,
+            override=None,
+            solution=None,
+        )
+        exact = scales.dtype == torch.uint8 and tuple(scales.shape) == (
+            weight.shape[0],
+            weight.shape[1] // 32,
+        )
+        if exact:
+            restored = (
+                codes.float().unflatten(-1, (-1, 32))
+                * scales.view(torch.float8_e8m0fnu).float().unsqueeze(-1)
+            ).flatten(-2)
+            exact = torch.equal(restored, weight.detach().float())
+        if not exact:
+            logger.warning(
+                f"layer {self.layer_id}: wo_a is not exactly MXFP8; keeping BF16"
+            )
+            # Never leave codes of another weight in place.
+            self._wo_a_mxfp8 = None
+            self._wo_a_mxfp8_fingerprint = None
+            return False
+        return self.keep_wo_a_fp8(codes, scales)
+
     def load_sink(self, param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
         start = self.mapping.attn.head_tp_rank * self.n_local_heads
         default_weight_loader(param, loaded_weight[start : start + self.n_local_heads])
         if self._padded_attn_sink is not None:
             self._padded_attn_sink[: self.n_local_heads].copy_(param)
+
+    def _q_scales_swizzled(self, rows: V41RowPlan, mode) -> bool:
+        """Whether q_norm may emit its FP8 scales in the wq_b GEMMs' layout.
+
+        TOKENSPEED_SM120_RMSNORM_SWIZZLED_SCALES only. Swizzled scales cannot
+        be selected or sliced by row, so this is limited to decode forwards
+        that keep every row (prefill narrows and partitions them), and to
+        projections whose prepacked native GEMM takes the layout unchanged.
+        """
+        if not _SM120_RMSNORM_SWIZZLED_SCALES:
+            return False
+        if not mode.is_decode() or mode.is_mixed() or rows.keep_rows is not None:
+            return False
+        if getattr(self.wq_b.quant_method, "prepared_weight_scales", None) is None:
+            return False
+        if self.indexer is not None:
+            method = self.indexer.wq_b.quant_method
+            if (
+                isinstance(method, _ReferenceFp8LinearMethod)
+                and method.prepared_weight_scales is None
+            ):
+                return False
+        return True
 
     def _kernel_attn_sink(self):
         if not self.attn_sink.is_cuda or self.n_kernel_heads == self.n_local_heads:
@@ -1153,13 +1353,20 @@ class DeepseekV41Attention(nn.Module):
             )
             and isinstance(self.wq_b.quant_method, _ReferenceFp8LinearMethod)
         ):
-            qr, q_input, q_scale = rmsnorm_quantize_fp8_group32(
-                qr,
-                self.q_norm.weight,
-                self.q_norm.variance_epsilon,
-                override=None,
-                solution="triton",
-            )
+            if self._q_scales_swizzled(rows, mode):
+                # Same normalized rows and codes; q_scale is the dense 1-D
+                # F8_128x4 tensor both wq_b GEMMs take as it is.
+                qr, q_input, q_scale = rmsnorm_quantize_fp8_group32_swizzled(
+                    qr, self.q_norm.weight, self.q_norm.variance_epsilon
+                )
+            else:
+                qr, q_input, q_scale = rmsnorm_quantize_fp8_group32(
+                    qr,
+                    self.q_norm.weight,
+                    self.q_norm.variance_epsilon,
+                    override=None,
+                    solution="triton",
+                )
         else:
             qr = q_input = _attention_norm(qr, self.q_norm) if qr.shape[0] else qr
             q_scale = None
@@ -1394,6 +1601,15 @@ class DeepseekV41Attention(nn.Module):
             # wo_b's group-32 activation quantization runs in wo_a's epilogue.
             codes, scales = grouped_bf16_projection_quantize_fp8(grouped, weight)
             out, _ = self.wo_b(codes, scale=scales, out=target)
+        elif self._wo_a_mxfp8 is not None and grouped.is_cuda and grouped.shape[0]:
+            # TOKENSPEED_SM120_WO_A_MXFP8: FP8 group-32 activations against the
+            # checkpoint's FP8 codes, all groups in one batched launch.
+            from tokenspeed_kernel.thirdparty.flashinfer.mxfp8_sm120_grouped import (
+                grouped_mxfp8_projection,
+            )
+
+            out = grouped_mxfp8_projection(grouped, *self._wo_a_mxfp8).flatten(1)
+            out, _ = self.wo_b(out, scale=None, out=target)
         else:
             out = grouped_bf16_projection(grouped, weight, None, None).flatten(1)
             out, _ = self.wo_b(out, scale=None, out=target)
@@ -1528,12 +1744,15 @@ def _v41_hc_post_pre(
     hc_eps: float,
     sinkhorn_iters: int,
     prefer_overlap: bool,
+    fuse_input: bool,
 ):
     """Prepare a consumer with its own weights at either sublayer boundary.
 
     Returns the completed residual, optional normalized input and optional
     consumer coefficients. Missing outputs are computed in the consumer's
     stream fork, preserving input/coefficient overlap on the local path.
+    ``fuse_input`` admits the SM120 kernel that finishes the post and forms the
+    normalized input in one pass; the coefficients stay with the caller.
     """
     if pending is None:
         return residual, None, None
@@ -1568,6 +1787,23 @@ def _v41_hc_post_pre(
         if shifted is not None:
             residual, x, pre, post, comb = shifted
             return residual, x, (pre, post, comb)
+    if fuse_input:
+        # TOKENSPEED_SM120_MHC_FUSED: the post and the normalized input from
+        # one pass over the residual, bit-identical to the two kernels. The
+        # coefficients are still missing, so the caller computes them where it
+        # does today (its own stream or the hc stream fork).
+        fused = try_mhc_post_input_norm_sm120(
+            pending.x,
+            residual,
+            pre_mix,
+            pending.post,
+            pending.comb,
+            norm.weight,
+            norm.variance_epsilon,
+        )
+        if fused is not None:
+            residual, x = fused
+            return residual, x, None
     return pending.finish(residual), None, None
 
 
@@ -1597,6 +1833,9 @@ class DeepseekV41DecoderLayer(nn.Module):
         super().__init__()
         self.layer_id = layer_id
         self.ced_decoder_start = ced_decoder_start
+        # Rows one prefill request can keep behind the CED narrowing (the
+        # model's max_decoder_rows_per_request); see _fused_moe_row_bound.
+        self.decoder_rows_per_request = int(config.sliding_window)
         self.norm_eps, self.hc_eps = config.rms_norm_eps, config.hc_eps
         self.hc_sinkhorn_iters = config.hc_sinkhorn_iters
         self.hc_stream_fork = StreamFork(hc_stream)
@@ -1668,7 +1907,12 @@ class DeepseekV41DecoderLayer(nn.Module):
         pending_post: V41HCPost | None,
         allow_ffn_reduce_fusion: bool,
         capture_input: bool,
+        ffn_before_launch: Callable[[], None] | None = None,
     ):
+        """``ffn_before_launch`` is an optional callback of the model, run on
+        the forward's stream when this layer's MegaMoE inputs are staged and
+        before its kernel is launched (decode, MegaMoE only; see
+        TOKENSPEED_ENGRAM_LOOKUP_UNDER_MEGAMOE). None changes nothing."""
         if ctx.forward_mode is None:
             raise ValueError("V4.1 attention requires an explicit forward mode")
         if hidden_states.shape[0] == 0:
@@ -1726,6 +1970,9 @@ class DeepseekV41DecoderLayer(nn.Module):
             hc_eps=self.hc_eps,
             sinkhorn_iters=self.hc_sinkhorn_iters,
             prefer_overlap=attn_overlap,
+            # Decode keeps post and input apart: the forked coefficients start
+            # right after the post, and a 40-layer graph showed no gain.
+            fuse_input=not decode_hc,
         )
         # The model applies Engram before entry. Taps read the completed stream
         # even when MegaMHC also prepared this attention's input and coefficients.
@@ -1808,6 +2055,7 @@ class DeepseekV41DecoderLayer(nn.Module):
             hc_eps=self.hc_eps,
             sinkhorn_iters=self.hc_sinkhorn_iters,
             prefer_overlap=decode_hc and can_overlap,
+            fuse_input=not decode_hc,
         )
         if x is None:
             x = _v41_hc_input(residual, attn_pre, self.ffn_norm)
@@ -1832,20 +2080,92 @@ class DeepseekV41DecoderLayer(nn.Module):
         )
         if ffn_overlap:
             residual.record_stream(self.hc_stream_fork.aux_stream)
+        # TOKENSPEED_SM120_FFN_MIXES_AFTER_ROUTER: submit the forked
+        # coefficients when the MegaMoE inputs are staged instead of in front
+        # of the router. Their fork event is still the one recorded at scope
+        # entry, so they wait for the same residual and produce the same
+        # values; only the submission order of the two branches changes.
+        mixes_before_launch = (
+            _SM120_FFN_MIXES_AFTER_ROUTER
+            and decode_hc
+            and ffn_overlap
+            and ffn_mixes is None
+            and self.ffn.use_mega_moe
+            and x.shape[0] > 0
+        )
         with self.hc_stream_fork.scope(enable=ffn_overlap, overlap=True) as fork:
-            # Submit independent coefficients before the sublayer, also in eager.
-            with fork.branch():
-                if ffn_mixes is None:
-                    ffn_mixes = v41_hc_mixes(
-                        residual,
-                        self.hc_ffn_fn,
-                        self.hc_ffn_scale,
-                        self.hc_ffn_base,
-                        self.norm_eps,
-                        self.hc_eps,
-                        self.hc_sinkhorn_iters,
-                    )
-            x = self._forward_ffn(x, image_mask, ctx, defer_reduce=defer_moe)
+            if mixes_before_launch or ffn_before_launch is not None:
+                submitted = []
+
+                def before_launch() -> None:
+                    if mixes_before_launch and not submitted:
+                        with fork.branch():
+                            submitted.append(
+                                v41_hc_mixes(
+                                    residual,
+                                    self.hc_ffn_fn,
+                                    self.hc_ffn_scale,
+                                    self.hc_ffn_base,
+                                    self.norm_eps,
+                                    self.hc_eps,
+                                    self.hc_sinkhorn_iters,
+                                )
+                            )
+                    if ffn_before_launch is not None:
+                        ffn_before_launch()
+
+                if not mixes_before_launch:
+                    # Coefficients where they are today; only the model's
+                    # callback rides the launch.
+                    with fork.branch():
+                        if ffn_mixes is None:
+                            ffn_mixes = v41_hc_mixes(
+                                residual,
+                                self.hc_ffn_fn,
+                                self.hc_ffn_scale,
+                                self.hc_ffn_base,
+                                self.norm_eps,
+                                self.hc_eps,
+                                self.hc_sinkhorn_iters,
+                            )
+                x = self._forward_ffn(
+                    x,
+                    image_mask,
+                    ctx,
+                    defer_reduce=defer_moe,
+                    before_launch=before_launch,
+                )
+                if mixes_before_launch:
+                    if not submitted:
+                        # The FFN ran without reaching a kernel launch (no
+                        # callback): compute the coefficients now.
+                        with fork.branch():
+                            submitted.append(
+                                v41_hc_mixes(
+                                    residual,
+                                    self.hc_ffn_fn,
+                                    self.hc_ffn_scale,
+                                    self.hc_ffn_base,
+                                    self.norm_eps,
+                                    self.hc_eps,
+                                    self.hc_sinkhorn_iters,
+                                )
+                            )
+                    ffn_mixes = submitted[0]
+            else:
+                # Submit independent coefficients before the sublayer, also in eager.
+                with fork.branch():
+                    if ffn_mixes is None:
+                        ffn_mixes = v41_hc_mixes(
+                            residual,
+                            self.hc_ffn_fn,
+                            self.hc_ffn_scale,
+                            self.hc_ffn_base,
+                            self.norm_eps,
+                            self.hc_eps,
+                            self.hc_sinkhorn_iters,
+                        )
+                x = self._forward_ffn(x, image_mask, ctx, defer_reduce=defer_moe)
             ffn_pre, post, comb = ffn_mixes
             if ffn_overlap:
                 for tensor in (ffn_pre, post, comb):
@@ -1875,11 +2195,78 @@ class DeepseekV41DecoderLayer(nn.Module):
             collective_global_num_tokens=None,
         )
 
-    def _forward_ffn(self, x, image_mask, ctx, *, defer_reduce: bool):
+    def _fused_moe_row_bound(self, x, ctx: ForwardContext, bound: int) -> int:
+        """Rank-uniform row bound this layer's fused MoE launch is sized for.
+
+        ``bound`` is the forward's largest per-rank token count, which is what
+        the launch gets unless TOKENSPEED_MEGA_MOE_DECODER_ROW_BOUND=1. With
+        the switch, a layer behind the CED narrowing of a pure-prefill
+        attention-DP forward passes the rows a rank can keep there
+        (``ced_decoder_row_bound``): at most one window per request, so the
+        MegaMoE kernel runs its small-launch row schedule instead of the one
+        for full chunks. The kernel's output does not depend on the bound.
+
+        Every input of the choice is replicated: the switch, the layer, the
+        DP metadata the event loop gathered and the capture state. A forward
+        with a decode or idle rank, a query-sharded forward (whose shard plan
+        already carries the narrowed counts), a forward whose caller reported
+        its own per-rank sizing and graph capture keep ``bound``.
+        """
+        if (
+            not mega_moe_decoder_row_bound_requested()
+            or self.layer_id < self.ced_decoder_start
+            or not self.ffn.use_mega_moe
+            or ctx.query_shard is not None
+            or not ctx.all_extend
+            or ctx.global_num_tokens is None
+            or ctx.global_bs is None
+            or ctx.collective_global_num_tokens is not None
+            or is_breakable_capture_active()
+            or (x.is_cuda and torch.cuda.is_current_stream_capturing())
+        ):
+            return bound
+        narrowed = min(
+            bound,
+            ced_decoder_row_bound(
+                ctx.global_num_tokens, ctx.global_bs, self.decoder_rows_per_request
+            ),
+        )
+        if x.shape[0] > narrowed:
+            # Fail before the collective: the kernel would refuse the launch on
+            # this rank only and leave its peers waiting for it.
+            raise RuntimeError(
+                f"{MEGA_MOE_DECODER_ROW_BOUND_ENV}=1: layer {self.layer_id} holds "
+                f"{x.shape[0]} rows behind the CED narrowing, above the bound "
+                f"{narrowed} of {self.decoder_rows_per_request} rows per request "
+                f"(tokens {list(ctx.global_num_tokens)}, requests "
+                f"{list(ctx.global_bs)})"
+            )
+        global _FUSED_MOE_ROW_BOUND_LOGGED
+        if not _FUSED_MOE_ROW_BOUND_LOGGED:
+            _FUSED_MOE_ROW_BOUND_LOGGED = True
+            logger.info(
+                f"{MEGA_MOE_DECODER_ROW_BOUND_ENV}=1: MegaMoE launches behind the "
+                f"CED narrowing are bounded by the narrowed rows (first: layer "
+                f"{self.layer_id}, {narrowed} rows instead of {bound})"
+            )
+        return narrowed
+
+    def _forward_ffn(
+        self,
+        x,
+        image_mask,
+        ctx,
+        *,
+        defer_reduce: bool,
+        before_launch: Callable[[], None] | None = None,
+    ):
         """MoE output after its communication.
 
         With defer_reduce, the pending plain all-reduce over the MoE TPxEP
         group is left to the caller; admission guarantees one is required.
+        ``before_launch`` (MegaMoE only) is handed to the MoE, which runs it
+        between its input staging and its kernel launch; on every other path
+        it is not called and the caller completes its work itself.
         """
         ctx = self._ffn_context(ctx)
         # Fused EP returns this rank's rows, including an empty tensor on idle
@@ -1890,11 +2277,21 @@ class DeepseekV41DecoderLayer(nn.Module):
                     "Expert-owned communication cannot defer its reduction"
                 )
             counts = self.comm_manager.moe_tp_ep_group_scattered_num_tokens(ctx)
+            if before_launch is not None and self.ffn.use_mega_moe:
+                return self.ffn(
+                    x,
+                    image_mask,
+                    sum(counts),
+                    self._fused_moe_row_bound(x, ctx, max(counts)),
+                    ctx=ctx,
+                    comm_manager=self.comm_manager,
+                    before_launch=before_launch,
+                )
             return self.ffn(
                 x,
                 image_mask,
                 sum(counts),
-                max(counts),
+                self._fused_moe_row_bound(x, ctx, max(counts)),
                 ctx=ctx if self.ffn.use_mega_moe else None,
                 comm_manager=self.comm_manager if self.ffn.use_mega_moe else None,
             )
@@ -2016,6 +2413,12 @@ class V41RowState:
 
 
 class DeepseekV41Model(nn.Module):
+    # Class-level defaults so a model built without __init__ (unit tests use
+    # __new__) sees "no Engram lookup pending"; __init__ sets its own.
+    engram_stream = None
+    _engram_events: dict = {}
+    _engram_lookups: dict = {}
+
     def __init__(
         self,
         config,
@@ -2108,6 +2511,20 @@ class DeepseekV41Model(nn.Module):
             ]
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        # TOKENSPEED_ENGRAM_LOOKUP_UNDER_MEGAMOE: a stream of its own for the
+        # Engram lookups forked under the previous layer's MegaMoE, and one
+        # (fork, done) event pair per Engram layer. Nothing is created, and no
+        # forward changes, unless the switch is set.
+        self.engram_stream = None
+        self._engram_events: dict[int, tuple[torch.cuda.Event, torch.cuda.Event]] = {}
+        self._engram_lookups: dict[int, torch.Tensor] = {}
+        if _ENGRAM_LOOKUP_UNDER_MEGAMOE and device.type == "cuda":
+            self.engram_stream = torch.cuda.Stream(device=device)
+            self._engram_events = {
+                layer.layer_id: (torch.cuda.Event(), torch.cuda.Event())
+                for layer in self.layers
+                if layer.engram is not None
+            }
         # The decoder view keeps at most a prompt's last window per extend
         # request (and one row per decode request), which bounds the rows the
         # decoder stage can see for a given request count.
@@ -2212,32 +2629,117 @@ class DeepseekV41Model(nn.Module):
             if pending_post is not None:
                 hidden = pending_post.finish(hidden)
                 pending_post = None
-            hidden = layer.engram(
+            embeddings = self._engram_lookups.pop(layer.layer_id, None)
+            if embeddings is None:
+                hidden = layer.engram(
+                    hidden,
+                    state.hashes[:, layer.engram.layer_hash_index],
+                    state.engram_token_mask,
+                    query_shard=(
+                        _row_plan(
+                            layer.layer_id, self.ced_decoder_start, ctx
+                        ).source_shard
+                        if ctx.query_shard is not None
+                        else None
+                    ),
+                )
+            else:
+                # The lookup ran on the Engram stream under the previous
+                # layer's MegaMoE; order this stream after it.
+                self._engram_events[layer.layer_id][1].wait(torch.cuda.current_stream())
+                hidden = layer.engram(
+                    hidden,
+                    state.hashes[:, layer.engram.layer_hash_index],
+                    state.engram_token_mask,
+                    query_shard=None,
+                    embeddings=embeddings,
+                )
+        next_engram = self._engram_lookup_target(layer, hidden, state, ctx, stage_end)
+        if next_engram is None:
+            hidden, pre_mix, pending_post, tap = layer(
                 hidden,
-                state.hashes[:, layer.engram.layer_hash_index],
-                state.engram_token_mask,
-                query_shard=(
-                    _row_plan(layer.layer_id, self.ced_decoder_start, ctx).source_shard
-                    if ctx.query_shard is not None
-                    else None
-                ),
+                pre_mix,
+                state.positions,
+                state.image_mask,
+                ctx,
+                pending_post=pending_post,
+                # Stage handoffs and Engram require a complete HC stream. Admit
+                # deferred reduction only when the next input can consume it fused.
+                allow_ffn_reduce_fusion=layer.layer_id + 1 < stage_end
+                and self.layers[layer.layer_id + 1].engram is None,
+                capture_input=layer.layer_id in self.dspark_capture_layers,
             )
-        hidden, pre_mix, pending_post, tap = layer(
-            hidden,
-            pre_mix,
-            state.positions,
-            state.image_mask,
-            ctx,
-            pending_post=pending_post,
-            # Stage handoffs and Engram require a complete HC stream. Admit
-            # deferred reduction only when the next input can consume it fused.
-            allow_ffn_reduce_fusion=layer.layer_id + 1 < stage_end
-            and self.layers[layer.layer_id + 1].engram is None,
-            capture_input=layer.layer_id in self.dspark_capture_layers,
-        )
+        else:
+            fork_event, done_event = self._engram_events[next_engram.layer_id]
+            consumer = torch.cuda.current_stream()
+            forked = []
+
+            def fork_engram_lookup() -> None:
+                # This layer's MegaMoE inputs are staged: the lookup may start
+                # now and is not ordered behind the MegaMoE launch itself.
+                fork_event.record(consumer)
+                forked.append(True)
+
+            hidden, pre_mix, pending_post, tap = layer(
+                hidden,
+                pre_mix,
+                state.positions,
+                state.image_mask,
+                ctx,
+                pending_post=pending_post,
+                allow_ffn_reduce_fusion=False,
+                capture_input=layer.layer_id in self.dspark_capture_layers,
+                ffn_before_launch=fork_engram_lookup,
+            )
+            if forked:
+                # Submitted after the MegaMoE launch, so the kernel holds its
+                # SMs before the lookup's host gathers arrive.
+                hashes = state.hashes[:, next_engram.engram.layer_hash_index]
+                state.hashes.record_stream(self.engram_stream)
+                with torch.cuda.stream(self.engram_stream):
+                    fork_event.wait(self.engram_stream)
+                    embeddings = next_engram.engram.lookup(hashes)
+                    done_event.record(self.engram_stream)
+                embeddings.record_stream(consumer)
+                self._engram_lookups[next_engram.layer_id] = embeddings
         if tap is not None:
             captured.append(tap)
         return hidden, pre_mix, pending_post
+
+    def _engram_lookup_target(
+        self,
+        layer: DeepseekV41DecoderLayer,
+        hidden: torch.Tensor,
+        state: V41RowState,
+        ctx: ForwardContext,
+        stage_end: int,
+    ) -> DeepseekV41DecoderLayer | None:
+        """The next layer when its Engram lookup may run under this layer's MegaMoE.
+
+        TOKENSPEED_ENGRAM_LOOKUP_UNDER_MEGAMOE only: a pure decode forward
+        without query sharding, this layer's FFN on MegaMoE (the only path
+        with a launch callback), and a next layer in the same stage whose
+        Engram table needs no collective (a shared host table or one rank).
+        """
+        if self.engram_stream is None or layer.layer_id + 1 >= stage_end:
+            return None
+        target = self.layers[layer.layer_id + 1]
+        mode = ctx.forward_mode
+        if (
+            target.engram is None
+            or target.layer_id not in self._engram_events
+            or mode is None
+            or not mode.is_decode()
+            or ctx.query_shard is not None
+            or not layer.ffn.use_mega_moe
+            or state.hashes is None
+            or not state.hashes.is_cuda
+            or hidden.shape[0] == 0
+            or hidden.device != self.engram_stream.device
+            or not target.engram.lookup_is_local()
+        ):
+            return None
+        return target
 
     def encoder_forward(
         self,
@@ -2252,6 +2754,9 @@ class DeepseekV41Model(nn.Module):
         image_mask: torch.Tensor | None,
     ) -> V41RowState:
         """Embed and run the layers below the candidate source, one row per token."""
+        if self._engram_lookups:
+            # Lookups of a forward that did not reach their layer are stale.
+            self._engram_lookups.clear()
         ctx.attn_backend.begin_indexer_stage()
         if pp_inbound is not None:
             raise NotImplementedError("V4.1 baseline does not accept pipeline state")
@@ -2279,6 +2784,20 @@ class DeepseekV41Model(nn.Module):
                 raise ValueError(
                     "Engram prepared hashes/mask have the wrong shape or dtype"
                 )
+        if (
+            hashes is not None
+            and ctx.forward_mode is not None
+            and ctx.forward_mode.is_extend()
+            and not is_breakable_capture_active()
+        ):
+            # TOKENSPEED_ENGRAM_HOST_PREFETCH: the hash ids are complete before
+            # the first layer, so a pure-prefill eager forward can have the
+            # host rows of its Engram layers gathered while the layers in front
+            # of them run. Decode and captured forwards keep the UVA gather:
+            # host work cannot run inside a graph replay.
+            for layer in self.layers[: self.ced_decoder_start]:
+                if layer.engram is not None:
+                    layer.engram.prefetch(hashes[:, layer.engram.layer_hash_index])
         h = (
             self.embed_tokens(input_ids, query_shard=ctx.query_shard)
             if input_embeds is None
@@ -2573,6 +3092,10 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
     """V4.1 language and vision model with strict checkpoint coverage."""
 
     model_cls = DeepseekV41Model
+    # Whether TOKENSPEED_MOE_EXPERT_PLACEMENT applies to this model's routed
+    # experts. The DSpark draft, built from this class, keeps contiguous
+    # ownership.
+    expert_placement_supported = True
 
     def __init__(
         self,
@@ -2591,6 +3114,10 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
         )
         self.is_multimodal_active = is_multimodal_active
         self._checkpoint_dir: str | None = None
+        # The placement file of the routed experts, read once; None for
+        # contiguous ownership.
+        self._expert_placement: FileExpertPlacement | None = None
+        self._expert_placement_resolved = False
         self.vision = None
         self.vision_embedder = None
         self.image_encoder = None
@@ -2744,6 +3271,112 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
             ".ffn.gate.e_score_correction_bias", ".ffn.gate.bias"
         )
 
+    def _resolve_expert_placement(self) -> FileExpertPlacement | None:
+        """Read TOKENSPEED_MOE_EXPERT_PLACEMENT once and route every layer by it.
+
+        Returns:
+            The validated placement, or None when the variable is unset or the
+            model does not take one. Every caller of one model sees the same
+            answer, so the checkpoint targets, the rank's expert filter, the
+            loader's slots and the routing map agree.
+        """
+        if self._expert_placement_resolved:
+            return self._expert_placement
+        self._expert_placement_resolved = True
+        path = expert_placement_path()
+        if path is None or self.model is None:
+            return None
+        config = self.model.config
+        if not self.expert_placement_supported:
+            # The MoE layers size their slots from the file when its expert
+            # count is theirs; a model that takes no placement must not have
+            # been resized by a file meant for another one.
+            if any(
+                layer.ffn.num_expert_slots != config.n_routed_experts
+                for layer in self.model.layers
+            ):
+                raise ValueError(
+                    f"{EXPERT_PLACEMENT_ENV}: the file replicates experts of a "
+                    f"{config.n_routed_experts}-expert model, but "
+                    f"{type(self).__name__} with as many experts takes no placement"
+                )
+            logger.info(
+                f"{EXPERT_PLACEMENT_ENV}: {type(self).__name__} keeps contiguous "
+                "expert ownership"
+            )
+            return None
+        placement = load_expert_placement(
+            path,
+            num_layers=config.num_hidden_layers,
+            num_experts=config.n_routed_experts,
+            ep_size=self.mapping.moe.ep_size,
+        )
+        for layer_id, layer in enumerate(self.model.layers):
+            if layer.ffn.num_expert_slots != placement.num_physical_experts:
+                raise ValueError(
+                    f"{EXPERT_PLACEMENT_ENV}: layer {layer_id} was built with "
+                    f"{layer.ffn.num_expert_slots} expert slots, the placement "
+                    f"has {placement.num_physical_experts}"
+                )
+            layer.ffn.set_expert_placement(
+                placement.id_map(
+                    layer_id, self.mapping.moe.ep_rank, layer.ffn.gate.weight.device
+                ),
+                placement.digest,
+            )
+        self._expert_placement = placement
+        logger.info(
+            f"{EXPERT_PLACEMENT_ENV}: EP rank {self.mapping.moe.ep_rank} of "
+            f"{self.mapping.moe.ep_size} places {config.n_routed_experts} experts "
+            f"into {placement.num_physical_experts} slots in "
+            f"{config.num_hidden_layers} layers from {path} "
+            f"(sha256 {placement.sha256[:16]})"
+        )
+        return placement
+
+    def _require_expert_placement_applied(self) -> None:
+        """Refuse to serve with a placement file the weight loading never saw.
+
+        ``_load_text_weights`` places the experts. A loader that fills the
+        parameters another way would leave them contiguous while the
+        environment asks for a placement.
+        """
+        if (
+            self.model is not None
+            and self.expert_placement_supported
+            and not self._expert_placement_resolved
+            and expert_placement_path() is not None
+        ):
+            raise RuntimeError(
+                f"{EXPERT_PLACEMENT_ENV} is set, but this model's weights were "
+                "not loaded through load_weights, the only loader that places "
+                "experts"
+            )
+
+    def _local_expert_ids(self, layer_id: int | None) -> list[int]:
+        """The logical experts this EP rank holds in ``layer_id``, in slot order.
+
+        Contiguous ownership is the same in every layer, so ``layer_id`` may be
+        None then; a placement needs the layer.
+        """
+        placement = self._resolve_expert_placement()
+        if placement is not None:
+            if layer_id is None:
+                raise ValueError(
+                    "An expert placement assigns experts per layer, but the "
+                    "parameter name carries no layer index"
+                )
+            return placement.local_slot_logical_experts(
+                layer_id, self.mapping.moe.ep_rank
+            )
+        count = self.model.config.n_routed_experts // self.mapping.moe.ep_size
+        return list(
+            range(
+                self.mapping.moe.ep_rank * count,
+                (self.mapping.moe.ep_rank + 1) * count,
+            )
+        )
+
     def _checkpoint_targets(self) -> dict[str, tuple[str, int | None]]:
         """Map each required local checkpoint constituent, not just fused parameters.
 
@@ -2765,11 +3398,9 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
                     "weight_scale",
                 ):
                     raise ValueError(f"Unsupported V4.1 expert parameter: {name}")
-                count = self.model.config.n_routed_experts // self.mapping.moe.ep_size
-                for expert in range(
-                    self.mapping.moe.ep_rank * count,
-                    (self.mapping.moe.ep_rank + 1) * count,
-                ):
+                layer_match = re.search(r"(?:^|\.)layers\.(\d+)\.ffn$", prefix)
+                layer_id = None if layer_match is None else int(layer_match[1])
+                for expert in self._local_expert_ids(layer_id):
                     for shard in ("w1", "w3") if projection == "w13" else ("w2",):
                         field = "scale" if suffix == "weight_scale" else "weight"
                         targets[f"{prefix}.experts.{expert}.{shard}.{field}"] = (
@@ -2866,6 +3497,14 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
                 linear.weight,
                 (weight * scale.unsqueeze(-1)).flatten(-2).to(torch.bfloat16),
             )
+            if _SM120_WO_A_MXFP8:
+                # The same local rows as codes with their 1x32 row scales.
+                self.model.layers[layer_id].attn.keep_wo_a_fp8(
+                    pair["weight"],
+                    pair["scale"].repeat_interleave(32, dim=0)[
+                        start % 32 : start % 32 + rows
+                    ],
+                )
             del pending[key]
 
     @torch.no_grad()
@@ -2893,6 +3532,7 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
         params = dict(self.named_parameters())
         targets = self._checkpoint_targets()
         config = self.model.config
+        placement = self._resolve_expert_placement()
         moe_loader = build_moe_checkpoint_loader(
             params_dict=params,
             expert_schema=ExpertCheckpointSchema(
@@ -2903,14 +3543,27 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
                 extra_names={},
             ),
             fused_schema=None,
-            num_experts=config.n_routed_experts,
+            # With a placement the loader takes the slot count, which exceeds
+            # the routed experts when the file replicates some.
+            num_experts=(
+                config.n_routed_experts
+                if placement is None
+                else placement.num_physical_experts
+            ),
             ep_rank=self.mapping.moe.ep_rank,
             ep_size=self.mapping.moe.ep_size,
             fused_gate_up_as_w13=False,
             include_bias=False,
             fused_load_style="per_expert",
             transpose_local_tensor_non_bias=False,
+            # None keeps contiguous ownership; a placement file fills each
+            # layer's local slots with the experts it assigns to this rank.
+            expert_placement=placement,
         )
+        local_experts = [
+            frozenset(self._local_expert_ids(layer_id))
+            for layer_id in range(config.num_hidden_layers)
+        ]
         seen, loaded = set(), set()
         skipped = Counter()
         pending = {}
@@ -2952,8 +3605,7 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
                     raise TypeError(
                         f"{raw_name}: expected packed FP4/E8M0, got {tensor.dtype}"
                     )
-                local_count = config.n_routed_experts // self.mapping.moe.ep_size
-                if expert_id // local_count != self.mapping.moe.ep_rank:
+                if expert_id not in local_experts[layer_id]:
                     skipped["remote_expert"] += 1
                     continue
                 if name not in targets:
@@ -3102,11 +3754,74 @@ class DeepseekV41ForCausalLM(BaseCausalLM):
                 # The target and DSpark share this hook. Refresh in place after
                 # a complete weight update; captured graphs retain the buffer.
                 module.quant_method.prepare_weight_scales(module)
+        if _SM120_WO_A_MXFP8:
+            self._prepare_sm120_wo_a_mxfp8()
+        if _SM120_LM_HEAD_MXFP8 == "draft":
+            self._prepare_sm120_lm_head_mxfp8()
+
+    def _prepare_sm120_wo_a_mxfp8(self) -> None:
+        """Finish the MXFP8 wo_a state and compile its kernels at load time."""
+        if not _sm120_mxfp8_experiments_supported():
+            logger.warning("TOKENSPEED_SM120_WO_A_MXFP8 ignored: no SM120 MXFP8 GEMM")
+            return
+        active = [layer.attn for layer in self.model.layers if layer.attn.ensure_wo_a_fp8()]
+        logger.info(
+            f"SM120 MXFP8 wo_a active on {len(active)}/{len(self.model.layers)} layers"
+        )
+        if not active:
+            return
+        from tokenspeed_kernel.thirdparty.flashinfer.mxfp8_sm120_grouped import (
+            grouped_mxfp8_projection,
+            warm_grouped_mxfp8,
+        )
+
+        attn = active[0]
+        codes, scales = attn._wo_a_mxfp8
+        # Every tile variant and the quantizer compile here, not on a forward:
+        # rows are runtime values, the group count is a model dimension.
+        warm_grouped_mxfp8(codes.device, codes.shape[0])
+        if not torch.cuda.is_current_stream_capturing():
+            grouped_mxfp8_projection(
+                torch.zeros(
+                    (1, codes.shape[0], codes.shape[2]),
+                    dtype=torch.bfloat16,
+                    device=codes.device,
+                ),
+                codes,
+                scales,
+            )
+
+    # The DSpark draft borrows the target's head after both models load; only
+    # the model that loads the head builds its MXFP8 copy.
+    _sm120_lm_head_owner = True
+
+    def _prepare_sm120_lm_head_mxfp8(self) -> None:
+        """Build the MXFP8 copy of the LM head the DSpark base logits read."""
+        if not self._sm120_lm_head_owner:
+            return
+        if not _sm120_mxfp8_experiments_supported():
+            logger.warning(
+                "TOKENSPEED_SM120_LM_HEAD_MXFP8 ignored: no SM120 MXFP8 GEMM"
+            )
+            return
+        head = getattr(getattr(self, "lm_head", None), "weight", None)
+        if head is None or head.dtype != torch.bfloat16 or not head.is_cuda:
+            return
+        from tokenspeed_kernel.thirdparty.flashinfer.mxfp8_sm120_lm_head import (
+            prepare_mxfp8_lm_head,
+        )
+
+        prepared = prepare_mxfp8_lm_head(head)
+        logger.info(
+            f"SM120 MXFP8 LM head {'prepared' if prepared else 'not applicable'} "
+            f"(mode {_SM120_LM_HEAD_MXFP8})"
+        )
 
     def post_quant_warmup(self) -> None:
         # Every loader calls this once the loaded state is final. The sharded
         # state loader post-processes modules before copying the saved state
         # in, so scales prepared during post-processing are stale there.
+        self._require_expert_placement_applied()
         self.post_load_weights()
         for module in self.modules():
             if isinstance(module, DeepseekV4MoE):
