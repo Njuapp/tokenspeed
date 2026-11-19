@@ -1,0 +1,47 @@
+# DeepSeek-V4.1-Flash on RTX 6000D: optimization branch
+
+Branch `opt/6000d-dsv41`, two commits on top of upstream `ee5b468f1`:
+
+1. the SM120 code as measured at handoff (the baseline of every number here);
+2. the optimizations. Each one is an environment switch that is off by default; with all switches off the forward
+   path equals commit 1.
+
+## Start here
+
+| File | What it is |
+| --- | --- |
+| `docs/PROGRESS_SUMMARY.md` | Conclusions, speedups ranked by gain, gaps, where the code is (Chinese) |
+| `docs/OPTIMIZATION_RESULTS.md` | Full gold-standard results, change list with kernel-level validation, audit notes (Chinese) |
+| `docs/SOL_ANALYSIS.md`, `docs/OPTIMIZATION_GOAL.md` | Per-kernel speed-of-light analysis and the goal the work followed |
+| `switch-sets/` | The switch combination of each tier, as sourced by the engine launch |
+| `results/timelines/` | Per-kernel time and launch counts per step from Nsight Systems captures, before and after |
+
+## Results (gold standards of the handoff, two nodes of 8x RTX 6000D)
+
+| Gold standard | Baseline | Bit-identical | Same precision | Changes precision |
+| --- | ---: | ---: | ---: | ---: |
+| Prefill ADP8 (req/s) | 5.688 | 7.341 (+29%) | 8.991 (+58%) | 9.755 (+72%) |
+| Prefill QCP8 (req/s) | 4.596 | — | 7.168 (+56%) | — |
+| Decode D16, handoff settings (tok/s per GPU, mean TPOT < 10 ms) | 1108.6 | 1203.0 (+8.5%) | 1425.2 (+28.6%) | 1488.1 (+34.2%) |
+| Decode D16, larger KV pool | — | same | 1451.9 (+31.0%) | 1540.2 (+38.9%) |
+
+The gold standards force the acceptance length and store no outputs, so they show speed only. Numerical claims
+(bit-identical, same precision) come from kernel-level tests against bitwise or FP64 references.
+
+## Switch sets
+
+| Use | Bit-identical | Same precision | Changes precision |
+| --- | --- | --- | --- |
+| Prefill ADP8 | `p7-bit.sh` | `p7-same.sh` | `p7-prec.sh`, `p8-prec1.sh` (adds single-pass BF16 PV) |
+| Prefill QCP8 | — | `q7-same.sh` | — |
+| Decode D16 | `d7-bit.sh` | `d7-same.sh` | `d7-prec.sh` |
+
+The two `-overlap` files additionally drop `--disable-overlap-schedule`, which is outside the handoff settings.
+The expert placement file named in the prefill sets is solved from the routing statistics of the gold-standard
+workload and is not in this branch; another workload needs its own (the solver is
+`python/tokenspeed/runtime/moe/expert_file_placement.py`).
+
+## Not covered
+
+Task-level output quality and real acceptance rate (most relevant for the "changes precision" tier), and
+end-to-end prefill-decode serving.

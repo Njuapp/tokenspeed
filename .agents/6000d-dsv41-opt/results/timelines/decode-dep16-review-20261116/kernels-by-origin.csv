@@ -1,0 +1,66 @@
+kernel,layer,component,where,launches,ms,share,ms_per_gpu_step,gpus
+cake_megamoe_m64_nocopier,megamoe,MoE 融合内核（专家计算+跨卡通信）,FlashInfer cake_mxfp4_megamoe，经 overlay 接入,13760,9527.818513,54.84926869479683,29.774432853125,8
+kernel_cutlass_kernel_flashinf_3...,sm120,MXFP8 稠密 GEMM,FlashInfer b12x，经 ops/gemm/flashinfer.py 接入,72640,2422.311257,13.944640194011223,7.569722678124999,8
+_selected_attention_grouped_parts,sm120,Decode 稀疏注意力,ops/attention/dsv41/_triton/selected_attention.py,38400,1853.613614,10.670790069300663,5.792542543750001,8
+Kernel2,lib,cuBLAS GEMM（torch.matmul / linear）,cuBLAS,33280,1795.937415,10.338762613915234,5.612304421875001,8
+_mhc_prenorm_tensor_sm120_kernel,sm120,mHC 残差,ops/residual/triton.py,27520,300.348452,1.7290309343462917,0.9385889125,8
+_mhc_pre_mix_hc4_kernel,main,mHC 残差,ops/residual/triton.py,27520,197.253752,1.135540525855188,0.616417975,8
+_index_score_shared_history_tiles,sm120,Indexer 打分,ops/attention/dsv41/_triton/index_score.py,1280,154.659652,0.8903369430491765,0.4833114125,8
+_selected_attention_merge,sm120,Decode 稀疏注意力,ops/attention/dsv41/_triton/selected_attention.py,38400,113.518405,0.6534970716701106,0.354745015625,8
+_fp8_group32_ue8m0_quantize_swizzled,main,量化,ops/quantization/triton.py,56320,108.034136,0.6219255064093834,0.337606675,8
+_mhc_post_hc4_triton_kernel,main,mHC 残差,ops/residual/triton.py,27520,97.416746,0.5608038471173988,0.30442733125,8
+_mhc_pre_layer_norm_hc4_kernel,main,mHC 残差,ops/residual/triton.py,27520,79.121622,0.4554833930479326,0.24725506875,8
+device_batched_topk_kernel,sm120,Indexer TopK,FlashInfer/cub 原生 TopK，经 thirdparty/flashinfer/topk.py 接入,2880,76.423501,0.43995098513124603,0.238823440625,8
+_index_score_tiles,sm120,Indexer 打分,ops/attention/dsv41/_triton/index_score.py,2560,64.055207,0.36874980933464285,0.20017252187499998,8
+_host_uint8_row_gather_kernel,main,Embedding,ops/embedding/triton_host_gather.py,1280,58.850729,0.33878893089760426,0.183908528125,8
+_rope_inplace_kernel,main,V4.1 注意力周边（gather/rope/topk 收尾等）,ops/attention/dsv41/triton.py,32640,51.261882,0.2951018363524289,0.16019338125,8
+_block_step_kernel,main,采样,ops/sampling/triton/dspark_block.py,1600,48.645254,0.2800385632589599,0.15201641875,8
+elementwise_kernel,lib,PyTorch 通用算子,PyTorch,22720,48.635632,0.2799831718109951,0.15198635,8
+vectorized_elementwise_kernel,lib,PyTorch 通用算子,PyTorch,49600,47.797237,0.27515674144137475,0.149366365625,8
+_sqrt_softplus_topk_kernel,main,MoE 周边（路由/staging/激活）,ops/moe/_triton/sqrt_softplus_topk.py,13760,41.458765,0.23866774310790634,0.129558640625,8
+_compact_attention,sm120,Prefill 稠密工作区注意力,ops/attention/dsv4/_triton/compact.py,960,40.850147,0.23516408147025633,0.127656709375,8
+_stage_mxfp4_mega_moe_inputs_kernel,main,MoE 周边（路由/staging/激活）,ops/moe/_deep_gemm/mega_moe_stage.py,13760,33.043073,0.1902207086549683,0.103259603125,8
+splitKreduce_kernel,lib,cuBLAS GEMM（torch.matmul / linear）,cuBLAS,17600,30.428901,0.17517157413936268,0.095090315625,8
+_rmsnorm_fp8_group32_ue8m0,main,量化,ops/quantization/triton.py,13760,24.263993,0.13968174035324105,0.075824978125,8
+_swa_rope_insert,main,V4.1 注意力周边（gather/rope/topk 收尾等）,ops/attention/dsv41/triton.py,12800,20.871085,0.120149617412947,0.06522214062500001,8
+kernel_cutlass_kernel_flashinf_4...,lib,RMSNorm,FlashInfer CuTe DSL,13760,18.597079,0.10705873349892212,0.058115871875,8
+_silu_and_mul_kernel,main,其他 TokenSpeed 内核,ops/activation/triton.py,13760,17.66799,0.10171020044984597,0.05521246875,8
+radixSortKVInPlace,lib,PyTorch 通用算子,PyTorch,1280,16.123785,0.09282059840198119,0.050386828125000005,8
+reduce_kernel,lib,PyTorch 通用算子,PyTorch,1280,15.609137,0.08985789855660477,0.048778553125,8
+_finish_topk_kernel,main,V4.1 注意力周边（gather/rope/topk 收尾等）,ops/attention/dsv41/triton.py,2880,10.726387,0.06174912776567238,0.033519959375000005,8
+_pack_kernel,main,V4.1 注意力周边（gather/rope/topk 收尾等）,ops/attention/dsv41/triton.py,5120,8.151182,0.046924316525149515,0.02547244375,8
+unrolled_elementwise_kernel,lib,PyTorch 通用算子,PyTorch,3520,5.170506,0.029765310127928036,0.016157831249999997,8
+_global_slots_kernel,main,V4.1 注意力周边（gather/rope/topk 收尾等）,ops/attention/dsv41/triton.py,2560,3.913737,0.022530405257076714,0.012230428125,8
+_normalized_dot_gate_kernel,main,mHC 残差,ops/residual/triton.py,640,3.682827,0.021201114127419412,0.011508834375,8
+_dspark_workspace_kernel,main,V4.1 注意力周边（gather/rope/topk 收尾等）,ops/attention/dsv41/triton.py,960,3.165957,0.018225622783666563,0.009893615625000001,8
+_compressor_pool,main,V4.1 注意力周边（gather/rope/topk 收尾等）,ops/attention/dsv41/triton.py,960,2.459171,0.014156832517476417,0.007684909375,8
+kernel_cutlass_kernel_flashinf_10...,lib,RMSNorm,FlashInfer CuTe DSL,320,1.990949,0.011461395545017876,0.006221715625000001,8
+_group_slots_kernel,main,注意力其他,ops/attention/mla/_triton/page_table.py,1280,1.89552,0.010912034654575423,0.0059235,8
+_compressor_tail_scatter_kernel,main,V4.1 注意力周边（gather/rope/topk 收尾等）,ops/attention/dsv41/triton.py,960,1.688583,0.009720750091334796,0.005276821875,8
+kernel_cutlass_kernel_flashinf_8...,lib,RMSNorm,FlashInfer CuTe DSL,1280,1.673987,0.009636724569146592,0.0052312093749999995,8
+_dspark_rows_kernel,main,V4.1 注意力周边（gather/rope/topk 收尾等）,ops/attention/dsv41/triton.py,960,1.639621,0.009438888100557952,0.005123815625,8
+_reference_rmsnorm_kernel,main,LayerNorm,ops/layernorm/triton.py,960,1.614435,0.009293898596458742,0.0050451093750000005,8
+indexSelectSmallIndex,lib,PyTorch 通用算子,PyTorch,320,1.526307,0.008786567737360224,0.004769709375,8
+_copy_page_table_kernel,main,注意力其他,ops/attention/mla/_triton/page_table.py,1280,1.434467,0.008257867822468158,0.0044827093749999995,8
+_apply_stop_conditions_kernel,main,元数据/采样辅助,ops/metadata/stop_conditions.py,320,1.074147,0.006183595682508349,0.003356709375,8
+_prepare_ngram_hash,main,元数据/采样辅助,ops/metadata/ngram.py,320,1.045347,0.006017801284110141,0.0032667093750000003,8
+elementwise_kernel_with_index,lib,PyTorch 通用算子,PyTorch,1920,1.03709,0.005970267799819377,0.0032409062500000003,8
+_vocab_shard_embedding_kernel,main,Embedding,ops/embedding/triton.py,640,1.011106,0.005820684409264549,0.0031597062500000003,8
+_selection_table_kernel,main,V4.1 注意力周边（gather/rope/topk 收尾等）,ops/attention/dsv41/triton.py,640,0.993983,0.0057221115799668916,0.003106196875,8
+index_elementwise_kernel,lib,PyTorch 通用算子,PyTorch,640,0.923233,0.005314821521401849,0.002885103125,8
+_zero_page_fields_kernel,main,KV cache 维护,ops/kvcache/triton.py,417,0.904034,0.005204297679219654,0.00282510625,8
+CatArrayBatchedCopy_vectorized,lib,PyTorch 通用算子,PyTorch,320,0.866274,0.00498692280131978,0.00270710625,8
+_decode_window_kernel,main,V4.1 注意力周边（gather/rope/topk 收尾等）,ops/attention/dsv41/triton.py,640,0.814915,0.004691261880926253,0.002546609375,8
+_scatter_gather_elementwise_kernel,lib,PyTorch 通用算子,PyTorch,640,0.794177,0.004571878400579654,0.0024818031250000002,8
+_mhc_pre_layer_triton_kernel,main,mHC 残差,ops/residual/triton.py,640,0.773603,0.004453439027223934,0.002417509375,8
+_prep_tape_kernel,main,元数据/采样辅助,ops/metadata/triton_tape.py,320,0.696961,0.00401223019798659,0.0021780031250000003,8
+_commit_ngram,main,元数据/采样辅助,ops/metadata/ngram.py,320,0.668355,0.003847552609077592,0.002088609375,8
+_mhc_init_kernel,main,mHC 残差,ops/residual/triton.py,320,0.618559,0.003560889488847134,0.001932996875,8
+VerifyChainGreedyKernel,?,未归类,,320,0.617057,0.003552242850430672,0.0019283031249999999,8
+_block_resolve_kernel,main,采样,ops/sampling/triton/dspark_block.py,320,0.524734,0.00302076242531547,0.00163979375,8
+_compressor_metadata,main,V4.1 注意力周边（gather/rope/topk 收尾等）,ops/attention/dsv41/triton.py,320,0.427521,0.0024611314929722395,0.001336003125,8
+fused_decode_input_prep_kernel,main,Runtime 内的小内核,runtime/execution/cache_loc_kernel.py,320,0.421599,0.002427040019801608,0.001317496875,8
+_dspark_anchors_kernel,main,V4.1 注意力周边（gather/rope/topk 收尾等）,ops/attention/dsv41/triton.py,320,0.372576,0.0021448268672781576,0.0011643,8
+distribution_elementwise_grid_stride_kernel,lib,PyTorch 通用算子,PyTorch,320,0.356385,0.0020516193289286644,0.0011137031250000001,8
+_dspark_block_kernel,main,V4.1 注意力周边（gather/rope/topk 收尾等）,ops/attention/dsv41/triton.py,320,0.348641,0.0020070390573593685,0.0010895031249999998,8
+_decode_rows_kernel,main,V4.1 注意力周边（gather/rope/topk 收尾等）,ops/attention/dsv41/triton.py,320,0.271681,0.0015639995816397114,0.000849003125,8
