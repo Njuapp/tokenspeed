@@ -70,6 +70,11 @@
   带 `-overlap` 的两个文件另外去掉 `--disable-overlap-schedule`。
 - 开关全关时，forward 路径与交接时的实测代码相同。专家放置文件在节点的 `opt-20261117/work/p-moe/`。
 - 跑一次金标准：节点上 `opt-20261117/run.sh`（Decode）和 `drive-prefill.sh`（Prefill），用法见 `OPTIMIZATION_RESULTS.md`。
+- **启动方式**：`../launch/` 里是每个数字实际用的引擎启动脚本（地址和路径改成了变量）。用别的测试框架跑本分支时有两点必须满足：
+  - **不要加 `--disable-pdl`**。加了以后 Decode 每步慢 11–14 ms（每卡 1 路时 29.3 ms 变成 40.3 ms），Prefill 每步慢 12.6%。
+  - **启动前 source 一个开关集**。所有开关默认关闭，不 source 跑的就是基线。
+
+  其余参数和环境变量见 `../launch/README.md`。
 
 ## 5. 这些结论有多可靠
 

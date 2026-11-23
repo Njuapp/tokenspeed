@@ -14,6 +14,7 @@ Branch `opt/6000d-dsv41`, two commits on top of upstream `ee5b468f1`:
 | `docs/OPTIMIZATION_RESULTS.md` | Full gold-standard results, change list with kernel-level validation, audit notes (Chinese) |
 | `docs/SOL_ANALYSIS.md`, `docs/OPTIMIZATION_GOAL.md` | Per-kernel speed-of-light analysis and the goal the work followed |
 | `switch-sets/` | The switch combination of each tier, as sourced by the engine launch |
+| `launch/` | The engine launch scripts behind every number, and the settings a benchmark of this branch must keep |
 | `results/timelines/` | Per-kernel time and launch counts per step from Nsight Systems captures, before and after |
 
 ## Results (gold standards of the handoff, two nodes of 8x RTX 6000D)
@@ -40,6 +41,15 @@ The two `-overlap` files additionally drop `--disable-overlap-schedule`, which i
 The expert placement file named in the prefill sets is solved from the routing statistics of the gold-standard
 workload and is not in this branch; another workload needs its own (the solver is
 `python/tokenspeed/runtime/moe/expert_file_placement.py`).
+
+## Launch requirements
+
+The numbers need the launch they were measured with; `launch/README.md` has the scripts and the details.
+
+- **PDL on.** Do not pass `--disable-pdl`: with it a decode step is 11 to 14 ms slower (29.3 ms becomes 40.3 ms at
+  one request per rank) and a prefill step 12.6% slower.
+- **A switch set sourced before the engine starts.** All switches are off by default, so without one the engine
+  runs the baseline.
 
 ## Not covered
 
