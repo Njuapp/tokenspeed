@@ -187,6 +187,17 @@ def test_gluon_petit_runtime_assets_are_packaged(monkeypatch) -> None:
     ]
 
 
+def test_split_mega_moe_tuned_tables_are_packaged(monkeypatch) -> None:
+    monkeypatch.chdir(SETUP_PY.parent)
+    setup_kwargs = _capture_setup_kwargs(monkeypatch, "cuda")
+
+    package = "tokenspeed_kernel.thirdparty.flashinfer"
+    name = "mega_moe_sm120_split_tuned.json"
+    assert package in setup_kwargs["packages"]
+    assert name in setup_kwargs["package_data"][package]
+    assert (SETUP_PY.parent / package.replace(".", "/") / name).is_file()
+
+
 def test_read_requirements_skips_installer_options_and_cycles(
     tmp_path, monkeypatch
 ) -> None:

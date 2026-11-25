@@ -594,6 +594,59 @@ top-k reduce. The EP ranks exchange rows over the kernels' own NCCL session.
 - `mega_moe_transport` does not apply: the kernels choose load/store or
   GPU-initiated networking per pair of ranks themselves.
 
+### Tuned kernel tables
+
+FlashInfer takes each row bucket's kernel configuration (tiles, pipeline
+stages, the SM split between the two concurrent kernels, cache hints) from
+tables it ships, measured per model and setup, and selects by rule where it
+has no table. `thirdparty/flashinfer/mega_moe_sm120_split_tuned.json` carries
+tables for setups FlashInfer ships none for, in FlashInfer's table schema.
+They are added to FlashInfer's lookup before the first layer is built, and a
+log line names the ones added and a digest of the resulting table set.
+
+The file holds one table: DeepSeek-V4.1-Flash (384 expert slots) at EP16 over
+two hosts of two 4-GPU NUMA nodes each, on GPUs with 156 SMs. Its anchors for
+16 to 256 rows per rank are tuned; the larger row buckets have anchors that
+name the transport only, which leaves them to FlashInfer's rule-based
+selection.
+
+- A table's key is its `signature` (hidden size, gate + up intermediate size,
+  top-k, expert slots), its `topology` (FlashInfer's name for the EP layout:
+  `ep16_2x2numa` is two hosts of two 4-GPU NUMA nodes each) and its `device`
+  (SMs, smallest Green Context partition, partition alignment). A launch uses
+  the table with exactly its key and, in it, the anchor nearest to the row
+  bucket in log space, so a bucket beyond the last anchor runs the last
+  anchor's configuration.
+- Gaps only: a key that FlashInfer's own file has is left to FlashInfer, whose
+  table takes over from ours once it ships one.
+- The signature counts expert slots. A placement with replicas has more slots
+  than the model has experts, matches no table of the plain model and keeps
+  FlashInfer's rule-based selection.
+- Every EP rank has to read the same tables. Building a layer compares the
+  digest across the ranks and raises if they differ, for example when one
+  host carries another file.
+- `TOKENSPEED_DISABLE_MEGA_MOE_SPLIT_TUNED_TABLES=1` (on every rank) adds
+  none of them and leaves FlashInfer's own selection, for example to measure
+  against it. Code that edits FlashInfer's tables itself calls
+  `mega_moe_sm120_split.install_tuned_tables()` first; otherwise the first
+  use of the kernels adds ours after its edit.
+- To use measurements of your own, tune the target setup with the tuning
+  tools of the kernels' authors (`tune_table.py`, with the kernels'
+  standalone runner; they are not part of the FlashInfer checkout) and put
+  the table their `merge_table.py` writes into this file. Tune with the
+  dispatch the installed FlashInfer runs: a FlashInfer whose adapter does not
+  use the packed cross-NUMA dispatch needs `MEGAMOE_XNUMA_PACK=0` in the
+  tuner's trials. Every table has to name its `device`:
+  `merge_table.py` leaves it out of a 110-SM table, which needs
+  `"device": [110, 8, 8]` added. A table that is added has to use knobs
+  FlashInfer reads, name the `p2p_split` backend in every entry of a topology
+  that spans NUMA nodes or hosts (with 8 K2 warps, the only count
+  FlashInfer's adapter runs there), split its device's SMs into aligned
+  partitions, and have every anchor resolved by FlashInfer's kernel selection
+  at its own row count. A file that fails a check, or a FlashInfer
+  without this lookup, costs one warning and leaves FlashInfer's selection as
+  it is.
+
 ## Kimi-K3 TP8 decode chain (`_cute_dsl/k3_decode.py`)
 
 On Blackwell with one TP8 group shared by attention and MoE, a decode forward
