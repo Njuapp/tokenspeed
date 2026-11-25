@@ -47,9 +47,10 @@ workload and is not in this branch; another workload needs its own (`placement/R
 
 A later commit adds `--moe-backend mega_moe_split`: the MoE layers on FlashInfer's CuTe DSL split kernels instead
 of its persistent kernel. It is opt-in, changes nothing for `mega_moe`, and is faster or slower depending on the
-load and the routing of the traffic (first readings: 8% to 9% shorter decode steps at 1 to 4 requests per GPU,
-longer steps from 8 on the gold-standard-like workload; ahead to higher loads on real text). `launch/README.md`
-has the launch, the FlashInfer source it needs and what to know before switching.
+load, the routing of the traffic and the expert placement (first readings: 16% more output on real text at 2
+requests per GPU and 5% more at 8; on synthetic tokens without an expert placement, whose routes are far more
+concentrated, 8% to 9% shorter decode steps at 1 to 4 requests per GPU and longer steps from 8).
+`launch/README.md` has the launch, the FlashInfer source it needs and what to know before switching.
 
 ## Launch requirements
 

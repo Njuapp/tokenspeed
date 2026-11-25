@@ -103,23 +103,39 @@ ships them on FlashInfer's NCCL transport; ours is `https://github.com/Euynaheh/
 `sm120-w4a8-megamoe`, commit `0dc6f0785abd`, with its submodules. Both backends run from that checkout: the
 persistent kernel reads the same step times on it as on `656eaee45`.
 
-**What to expect.** First readings, one node, attention DP8, MoE EP8, `d7-same.sh`, the step-time measurement
-described below (131072-token context of random tokens, fixed acceptance length 6), 2026-11-25:
+**What to expect.** It depends on the traffic. Readings so far, one node, attention DP8, MoE EP8, `d7-same.sh`:
+
+*Real text* (8192-token prompts, 1024 output tokens, greedy, the real DSpark acceptance, closed loop), output
+tokens per second of the node:
+
+| Requests per GPU | 2 | 8 | 16 |
+| --- | ---: | ---: | ---: |
+| Persistent kernel | 1379 | 4197 | 7027 |
+| Split kernels | 1594 | 4421 | 6929 |
+| Difference | +15.7% | +5.3% | -1.4% |
+
+The column for 2 requests per GPU is `mega_moe_split` as in this branch (TPOT 10.0 against 11.6 ms). The other
+two columns come from an earlier build that ran the split kernels for the decode forwards and the persistent
+kernel for prefill; the backend itself is being measured at those loads.
+
+*Synthetic tokens without an expert placement*, the least favourable case for the split kernels. The step-time
+measurement described below feeds random tokens (131072-token context, fixed acceptance length 6). Their routes
+are far more concentrated than those of real text: one expert takes about 12% of a layer's routes, a layer's
+routes reach about 43 of its 384 experts at one request per rank, and with the default placement the busiest GPU
+receives about twice the mean number of rows. Decode step (ms), 2026-11-25:
 
 | Requests per rank | 1 | 2 | 4 | 8 | 16 | 32 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `mega_moe`, decode step (ms) | 29.32 | 31.65 | 35.95 | 40.27 | 49.11 | 66.82 |
-| `mega_moe_split`, decode step (ms) | 26.76 | 28.91 | 33.20 | 42.26 | 56.41 | 83.53 |
+| `mega_moe` | 29.32 | 31.65 | 35.95 | 40.27 | 49.11 | 66.82 |
+| `mega_moe_split` | 26.76 | 28.91 | 33.20 | 42.26 | 56.41 | 83.53 |
 | Difference | -8.7% | -8.7% | -7.6% | +4.9% | +14.9% | +25.0% |
 
-That workload routes very unevenly: one expert takes about 12% of a layer's routes, and at one request per rank a
-layer's routes reach about 43 of its 384 experts. The split kernels gain while each active expert receives few
-rows, so traffic whose routes spread over more experts keeps them ahead to higher loads. On real text (8192-token
-prompts, 1024 output tokens, greedy, the real DSpark acceptance, 16 requests in a closed loop = 2 per GPU) the
-engine served 1594 tokens/s on `mega_moe_split` against 1379 on `mega_moe` (+15.7%, TPOT 10.0 against 11.6 ms). An
-earlier build that ran the split kernels for decode-sized forwards only read +15% / +5% / -1% at 2 / 8 / 16
-requests per GPU on the same real-text benchmark. A balanced expert placement moves the crossover up as well.
-Decode gold-standard results for both backends, with a static expert placement, will be added here.
+The split kernels gain while each active expert receives few rows, and a GPU that receives twice the mean costs
+them more than it costs the persistent kernel. A balanced expert placement (`../placement/`) therefore helps
+them more: in a kernel-level replay of these routes, the MoE time of the split kernels against the persistent
+kernel went from -18% / -17% / -11% / +6% / +22% / +43% at 1 / 2 / 4 / 8 / 16 / 32 requests per rank with the
+default placement to -19% / -19% / -16% / -2% / +14% / +36% with the experts rebalanced over the GPUs (no
+replicas). Engine results with a static placement, for both backends, will be added here.
 
 **Things to know before switching.**
 
