@@ -137,6 +137,84 @@ kernel went from -18% / -17% / -11% / +6% / +22% / +43% at 1 / 2 / 4 / 8 / 16 / 
 default placement to -19% / -19% / -16% / -2% / +14% / +36% with the experts rebalanced over the GPUs (no
 replicas). Engine results with a static placement, for both backends, will be added here.
 
+**Two nodes (EP16): a tuned kernel table.** FlashInfer takes the split kernels' configuration for a row bucket
+(tiles, pipeline stages, the SM split between the two concurrent kernels, cache hints) from tables measured per
+model and setup, and selects by rule where it has none. Commit `0dc6f0785abd` has tables for the RTX 6000D (156
+SMs) at EP4 and EP8 and none for EP16 over two hosts, so a `dep16` engine ran the rule-based selection. This
+branch carries a table for that setup (`mega_moe_sm120_split_tuned.json` in
+`tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/flashinfer/`) and adds it to FlashInfer's lookup before
+the first layer is built. Nothing changes in the launch; the engine log names the table ("Split MegaMoE: tuned
+kernel tables added to FlashInfer's: ..."). FlashInfer's notes at this commit say that FlashInfer itself does not
+run these kernels at EP16; on two nodes the backend is covered by this branch's multi-rank kernel test (run on
+16 ranks, with its reference check) and by the engine runs below.
+
+It was measured with the tuning tools of the kernels' authors (`tune_table.py` with the kernels' standalone
+runner; they are not part of the FlashInfer checkout) at EP16 over the two nodes: coordinate descent per anchor,
+median of 100 launches after an L2 flush, balanced routes (every expert receives the same number of rows), a
+second route seed to confirm, for 16, 32, 64, 128 and 256 rows per rank. Every anchor was then timed through this
+backend with balanced routes and with decode routes recorded from the engine, with a reference check of the
+output. One anchor differs from the tuner's choice: at 32 rows the knobs of the 64-row anchor are about 10% faster
+on the recorded decode routes and no slower on balanced routes. Buckets above 256 rows keep the rule-based
+selection.
+
+One MoE launch at EP16 through this backend (microseconds): the kernel launch without the input staging and the
+output copy, slowest of the 16 ranks, median of 100 launches, balanced routes. A decode step at 1 / 2 / 4 / 8 /
+16 / 32 requests per rank has 6 / 12 / 24 / 48 / 96 / 192 rows per rank and runs the buckets 7 / 16 / 32 / 64 /
+128 / 256.
+
+| Row bucket | 7 | 16 | 32 | 64 | 128 | 168 | 256 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Rule-based selection | 609.7 | 660.5 | 750.4 | 904.5 | 1258.9 | 1456.7 | 2050.5 |
+| Tuned table | 520.8 | 552.4 | 611.7 | 768.8 | 1106.7 | 1298.8 | 1883.7 |
+| Difference | -14.6% | -16.4% | -18.5% | -15.0% | -12.1% | -10.8% | -8.1% |
+
+On the recorded decode routes of the step-time workload (synthetic tokens, concentrated routes), the sum over
+the same 800 MoE launches (20 decode steps of 40 layers) at 1 / 2 / 4 / 8 / 16 / 32 requests per rank changes by
+-10.0% / -13.5% / -12.4% / -12.2% / -15.6% / -2.3%.
+
+Decode step of the engine (ms), two nodes, 16 ranks, `d7-same.sh`, the step-time measurement described below
+(synthetic tokens, no expert placement), 2026-11-26:
+
+| Requests per rank | 1 | 2 | 4 | 8 | 16 | 32 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `mega_moe` | 30.36 | 31.62 | 35.05 | 40.61 | 53.67 | 81.68 |
+| `mega_moe_split`, rule-based selection | 27.45 | 31.23 | 39.85 | 57.22 | 82.23 | 127.31 |
+| `mega_moe_split`, tuned table | 26.33 | 29.64 | 37.11 | 52.30 | 72.80 | 123.66 |
+| Tuned table against rule-based | -4.1% | -5.1% | -6.9% | -8.6% | -11.5% | -2.9% |
+| Tuned table against `mega_moe` | -13.3% | -6.3% | +5.9% | +28.8% | +35.6% | +51.4% |
+
+The three runs had a KV pool of 524288 tokens (`OPT_MAX_TOTAL_TOKENS`; the script's default is 786432), and the
+two `mega_moe_split` runs pinned the NICs as described below. A repeat of the tuned-table run as
+`decode-step-engine.sh` launches it (default pool, NICs left to NCCL) read 26.41 / 29.76 / 37.10 / 52.32 / 72.76
+/ 123.61 ms.
+
+So on two nodes the table shortens every step of the split backend. On this workload the split backend is ahead
+of the persistent kernel at 1 and 2 requests per rank and behind from 4, with the table (13.3% and 6.3% ahead)
+and without it (9.6% and 1.2%). Real text spreads its routes more, which on one node moved that point up; it is
+not measured on two nodes.
+
+What to know about the table:
+
+- It applies where FlashInfer's key matches: this model with 384 expert slots, an EP16 group whose P2P domains
+  hold 4 GPUs (measured as two hosts of two 4-GPU NUMA nodes) and GPUs with 156 SMs. Any other setup keeps what
+  FlashInfer selects; a placement with replicas has more expert slots and therefore keeps the rule-based
+  selection. The key does not cover the network: ours is four RDMA NICs per node, one per pair of GPUs on the
+  same PCIe switch. On nodes that differ, compare against a run with the table turned off (last item).
+- It was tuned for the dispatch FlashInfer `0dc6f0785abd` runs in an engine. The kernels' standalone runner packs
+  the dispatch to the other NUMA nodes and the other host, by default from 32 rows per rank at EP16; with the
+  rule-based configuration at 64 rows that reads 788.6 against 901.7 microseconds per launch. FlashInfer's
+  adapter at this commit does not use the packed dispatch (`MEGAMOE_XNUMA_PACK` has no effect in an engine), so
+  the tuner ran with packing off. A FlashInfer that packs needs a table tuned with packing (the tuner's default);
+  once FlashInfer ships a table of its own for this setup, that one is used and ours is ignored.
+- The kernels reach the other NUMA nodes and the other host over RDMA NICs, which NCCL picks per GPU.
+  FlashInfer's `MEGAMOE_GIN_HCA_MAP` pins them instead (one NIC name per GPU of a node, in GPU order). The tuning
+  and the kernel timings above ran with each GPU pinned to the NIC on its PCIe switch and with
+  `NCCL_NVLS_ENABLE=0`. Kernel timings without the two settings (buckets 16, 64, 128 and 256 with balanced routes;
+  2, 8 and 16 requests per rank on the recorded routes) were within 0.3% of those with them, inside the
+  run-to-run spread, so the launch scripts do not set them.
+- `TOKENSPEED_DISABLE_MEGA_MOE_SPLIT_TUNED_TABLES=1` on every rank runs without it. To use a table of your own,
+  see "Tuned kernel tables" in `tokenspeed-kernel/python/tokenspeed_kernel/ops/moe/README.md`.
+
 **Things to know before switching.**
 
 - Numerics: both kernels quantize the expert intermediate to FP8. Against a result without that rounding both are
@@ -145,8 +223,12 @@ replicas). Engine results with a static placement, for both backends, will be ad
 - Reproducibility: the persistent kernel returned the same tokens on every repeat of a workload (1512 requests).
   On the split kernels 2 of 168 requests differed between repeats. The cause is not investigated.
 - Start-up and memory: the split kernels are compiled per row bucket and every bucket up to the MegaMoE row
-  capacity is launched once before CUDA graph capture. With a capacity of 2048 rows the engine took 13 minutes
-  to its first request instead of 5, and held 2.8 GB more per GPU.
+  capacity is launched once before CUDA graph capture. With a capacity of 2048 rows, on one node (EP8) the engine
+  took 13 minutes to its first request instead of 5 and held 2.8 GB more per GPU. On two nodes (EP16) it was
+  ready after 8 to 11 minutes instead of 6 (14 minutes when the kernels of a configuration compile for the first
+  time) and held 6.5 GB more per GPU with the tuned table and 7.0 GB with the rule-based selection (free memory
+  after graph capture with a KV pool of 524288 tokens: 20.2 GB on the persistent kernel, 13.7 and 13.3 GB on the
+  split kernels; 13.0 GB with the tuned table and the default pool).
 - Prefill-sized forwards run the split kernels too, and are slower on them. That is why this backend is meant
   for decode engines.
 - Expert placement files (`TOKENSPEED_MOE_EXPERT_PLACEMENT`, see `../placement/`) apply to both backends. On the
