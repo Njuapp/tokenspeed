@@ -15,6 +15,7 @@ Branch `opt/6000d-dsv41`, two commits on top of upstream `ee5b468f1`:
 | `docs/SOL_ANALYSIS.md`, `docs/OPTIMIZATION_GOAL.md` | Per-kernel speed-of-light analysis and the goal the work followed |
 | `switch-sets/` | The switch combination of each tier, as sourced by the engine launch |
 | `launch/` | The engine launch scripts behind every number, and the settings a benchmark of this branch must keep |
+| `placement/` | How to solve a static expert placement (with or without replicas) for a workload |
 | `results/timelines/` | Per-kernel time and launch counts per step from Nsight Systems captures, before and after |
 
 ## Results (gold standards of the handoff, two nodes of 8x RTX 6000D)
@@ -39,8 +40,16 @@ The gold standards force the acceptance length and store no outputs, so they sho
 
 The two `-overlap` files additionally drop `--disable-overlap-schedule`, which is outside the handoff settings.
 The expert placement file named in the prefill sets is solved from the routing statistics of the gold-standard
-workload and is not in this branch; another workload needs its own (the solver is
-`python/tokenspeed/runtime/moe/expert_file_placement.py`).
+workload and is not in this branch; another workload needs its own (`placement/README.md`: the load profile of
+`python/tokenspeed/runtime/moe/expert_file_placement.py` and the solver `placement/solve_placement.py`).
+
+## A second MegaMoE backend for decode
+
+A later commit adds `--moe-backend mega_moe_split`: the MoE layers on FlashInfer's CuTe DSL split kernels instead
+of its persistent kernel. It is opt-in, changes nothing for `mega_moe`, and is faster or slower depending on the
+load and the routing of the traffic (first readings: 8% to 9% shorter decode steps at 1 to 4 requests per GPU,
+longer steps from 8 on the gold-standard-like workload; ahead to higher loads on real text). `launch/README.md`
+has the launch, the FlashInfer source it needs and what to know before switching.
 
 ## Launch requirements
 

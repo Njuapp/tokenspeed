@@ -17,6 +17,7 @@
 #   OPT_EXTRA_ENV         optional: a file of ../switch-sets, sourced before the engine starts (unset = baseline)
 #   OPT_EXTRA_ARGS        optional: extra `ts serve` arguments
 #   OPT_MAX_TOTAL_TOKENS  optional (default 786432);  MEGA_MOE_TRANSPORT  optional (default all_gin)
+#   OPT_MOE_BACKEND       optional: mega_moe (default) or mega_moe_split, as in decode-engine.sh
 # Put the step observer of your benchmark on PYTHONPATH as you would for any other engine.
 # PDL stays on: do not add --disable-pdl (see README.md).
 set -euo pipefail
@@ -40,6 +41,11 @@ export NCCL_SOCKET_IFNAME="$network_if" GLOO_SOCKET_IFNAME="$network_if" NCCL_DE
 unset NCCL_IB_HCA NCCL_IB_DISABLE
 if [[ -n "${OPT_EXTRA_ENV:-}" ]]; then source "$OPT_EXTRA_ENV"; fi
 export TOKENSPEED_SPEC_SIMULATED_ACCEPT_LEN=6
+case "${OPT_MOE_BACKEND:-mega_moe}" in
+    mega_moe) moe_backend=(--moe-backend mega_moe) ;;
+    mega_moe_split) moe_backend=(--moe-backend mega_moe_split --draft-moe-backend mega_moe) ;;
+    *) echo "OPT_MOE_BACKEND must be mega_moe or mega_moe_split" >&2; exit 2 ;;
+esac
 case "$layout" in
     dep16)
         ranks=16
@@ -60,7 +66,7 @@ for size in 1 2 4 8 16 32 64; do
     if (( size <= maxb )); then sizes+=("$size"); fi
 done
 command=(ts serve --headless --model "$OPT_MODEL" --served-model-name deepseek-v41-flash --dtype bfloat16
-    --moe-backend mega_moe --mega-moe-transport "${MEGA_MOE_TRANSPORT:-all_gin}"
+    "${moe_backend[@]}" --mega-moe-transport "${MEGA_MOE_TRANSPORT:-all_gin}"
     --deepseek-v4-mega-moe-max-num-tokens 2048
     --engram-host-table --engram-host-table-layout shared --engram-host-table-dir /dev/shm
     --max-model-len 135168 --gpu-memory-utilization 0.98

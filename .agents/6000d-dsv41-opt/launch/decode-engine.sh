@@ -9,6 +9,9 @@
 # Environment: the variables of env.sh, plus
 #   OPT_MODEL           model directory
 #   MEGA_MOE_TRANSPORT  all_gin (the gold standard), all_lsa, lsa_where_reachable or auto
+#   OPT_MOE_BACKEND     optional: mega_moe (default; FlashInfer's persistent kernel) or mega_moe_split (FlashInfer's
+#                       split kernels for the target model; the DSpark draft model, whose top-k is odd, stays on
+#                       mega_moe). mega_moe_split needs a FlashInfer that ships the split kernels (see README.md).
 #   OPT_EXTRA_ENV       optional: a file of ../switch-sets, sourced before the engine starts (unset = baseline)
 #   OPT_EXTRA_ARGS      optional: extra `ts serve` arguments ("--max-total-tokens 393216" = the larger KV pool)
 # PDL stays on: do not add --disable-pdl (see README.md).
@@ -21,6 +24,11 @@ network_if=${5:?routed interface to the peer node}
 speculation=${6:?none or dspark}
 out=${7:?case output directory}
 transport=${MEGA_MOE_TRANSPORT:?all_gin, all_lsa, lsa_where_reachable or auto}
+case "${OPT_MOE_BACKEND:-mega_moe}" in
+    mega_moe) moe_backend=(--moe-backend mega_moe) ;;
+    mega_moe_split) moe_backend=(--moe-backend mega_moe_split --draft-moe-backend mega_moe) ;;
+    *) echo "OPT_MOE_BACKEND must be mega_moe or mega_moe_split" >&2; exit 2 ;;
+esac
 : "${OPT_MODEL:?model directory}"
 [[ "$node" == 0 || "$node" == 1 ]]
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -61,7 +69,7 @@ esac
 if [[ -n "${OPT_EXTRA_ENV:-}" ]]; then source "$OPT_EXTRA_ENV"; fi
 command=(ts serve --headless --model "$OPT_MODEL" --served-model-name deepseek-v41-flash
     --sampling-backend greedy --dtype bfloat16
-    --moe-backend mega_moe --mega-moe-transport "$transport"
+    "${moe_backend[@]}" --mega-moe-transport "$transport"
     --deepseek-v4-mega-moe-max-num-tokens 2048
     --engram-host-table --engram-host-table-layout shared
     --engram-host-table-dir /dev/shm
