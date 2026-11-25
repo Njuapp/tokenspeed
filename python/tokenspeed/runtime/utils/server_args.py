@@ -3316,8 +3316,14 @@ class ServerArgs:
             default=ServerArgs.moe_backend,
             help="MoE runner backend: auto, triton, gluon, flashinfer_trtllm, "
             "flashinfer_cutlass, flashinfer_cutedsl, deep_gemm, mega_moe, "
-            "gluon_petit, or a registered plugin solution. Under --numerics "
-            "rl-bitwise the selected kernel must declare batch invariance.",
+            "mega_moe_split, gluon_petit, or a registered plugin solution. "
+            "mega_moe_split runs FlashInfer's split MegaMoE kernels (SM120, "
+            "MXFP4 experts) in place of mega_moe's persistent kernel; which is "
+            "faster depends on the rows per forward and on how the routes "
+            "spread over the experts, so measure on the deployment's own "
+            "traffic. It needs an even top-k: give a draft model with an odd "
+            "one --draft-moe-backend mega_moe. Under --numerics rl-bitwise the "
+            "selected kernel must declare batch invariance.",
         )
         parser.add_argument(
             "--moe-cutlass-fused-finalize",
@@ -3557,14 +3563,17 @@ class ServerArgs:
             default=ServerArgs.mega_moe_transport,
             choices=["all_gin", "all_lsa", "lsa_where_reachable", "auto", "tuned"],
             help=(
-                "Required by the SM120 MegaMoE: how EP ranks exchange rows. "
+                "Required by the SM120 MegaMoE's persistent kernel "
+                "(--moe-backend mega_moe, also when only the draft model runs "
+                "it): how EP ranks exchange rows. "
                 "all_gin uses NCCL GPU-initiated networking for every pair and "
                 "works on any topology; all_lsa uses load/store through peer "
                 "mappings and needs every pair on one host; "
                 "lsa_where_reachable uses load/store inside a host and "
                 "GPU-initiated networking across hosts; auto probes the "
                 "candidates at startup; tuned reads FlashInfer's offline knob "
-                "cache. Other MegaMoE kernels have one transport and ignore it."
+                "cache. Other MegaMoE kernels (mega_moe_split among them) "
+                "choose their transport themselves and ignore it."
             ),
         )
         parser.add_argument(

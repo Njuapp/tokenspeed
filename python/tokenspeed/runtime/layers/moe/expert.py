@@ -378,7 +378,7 @@ class MoELayer(torch.nn.Module):
             deepep_low_latency_max_num_tokens_per_gpu = global_server_args_dict[
                 "low_latency_max_num_tokens_per_gpu"
             ]
-        elif moe_backend == "mega_moe":
+        elif moe_backend in ("mega_moe", "mega_moe_split"):
             mapping = global_server_args_dict["mapping"]
             process_group = pg_manager.get_device_process_group(mapping.moe.ep_group)
         # --moe-combine-order: how a token's routed contributions meet across

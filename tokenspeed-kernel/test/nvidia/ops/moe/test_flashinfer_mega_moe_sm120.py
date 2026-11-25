@@ -30,11 +30,15 @@ process per GPU on 4, 8 or 16 SM120 GPUs:
 or across two hosts with ``torchrun --nnodes 2 --nproc-per-node 8
 --rdzv_backend c10d --rdzv_endpoint <host>:<port>``. ``MEGA_MOE_TRANSPORT``
 selects how the ranks exchange rows (default ``all_gin``).
+
+The same cases run on the split kernels (solution ``mega_moe_split``) when the
+installed FlashInfer ships them on its NCCL transport.
 """
 
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -57,7 +61,10 @@ if not (
         allow_module_level=True,
     )
 
-from tokenspeed_kernel.thirdparty.flashinfer import mega_moe_sm120  # noqa: E402
+from tokenspeed_kernel.thirdparty.flashinfer import (  # noqa: E402
+    mega_moe_sm120,
+    mega_moe_sm120_split,
+)
 
 if not mega_moe_sm120.available():
     pytest.skip(
@@ -73,6 +80,10 @@ from tokenspeed_kernel.ops.moe._flashinfer.mega_moe import (  # noqa: E402
     destroy_flashinfer_mxfp4_mega_moe,
     fuse_flashinfer_mxfp4_mega_moe_shared_expert,
 )
+from tokenspeed_kernel.ops.moe._flashinfer.mega_moe_split import (  # noqa: E402
+    destroy_flashinfer_mxfp4_mega_moe_split,
+    flashinfer_mxfp4_mega_moe_split_process_weights,
+)
 from utils import assert_no_triton_compile  # noqa: E402
 
 from tokenspeed.runtime.layers.activation import SwigluArg  # noqa: E402
@@ -81,12 +92,16 @@ from tokenspeed.runtime.layers.activation import SwigluArg  # noqa: E402
 EXPERTS, HIDDEN, INTER, TOP_K, LIMIT = 384, 5120, 2304, 6, 10.0
 # Above 512 rows per rank the kernel switches from 64-row to 128-row tasks.
 MAX_TOKENS = 640
+SPLIT_KERNEL = "flashinfer_mxfp4_mega_moe_split_apply"
 # Rows per rank in the reference comparisons; the reference decodes every
 # routed expert, so it stays small while the bound selects the task size.
 REFERENCE_ROWS = 40
 # Weight scales 2^-9 .. 2^-6 keep the first projection O(1), inside the clamp.
 ROUTED_EXPONENTS = (118, 122)
-SHARED_EXPONENTS = (116, 119)
+# The shared expert's weights are scaled to give about a tenth of the routed
+# sum: far outside every tolerance below, so an output with the shared expert
+# missing or added where it does not belong fails.
+SHARED_EXPONENTS = (117, 120)
 LOG2_E = 1.4426950408889634
 
 
@@ -264,7 +279,7 @@ def _rows(rank: int, world_size: int, bound: int) -> int:
     return min(bound - (5 * rank) % (bound // 2), REFERENCE_ROWS)
 
 
-def _assert_close(actual, reference):
+def _assert_close(actual, reference, on_split=False):
     assert torch.isfinite(actual.float()).all()
     if reference.numel() == 0:
         return
@@ -272,11 +287,19 @@ def _assert_close(actual, reference):
     # on a few E4M3 requantization codes at rounding boundaries; one flipped
     # code moves an output by a fraction of the output range, so the bound is
     # 2% of that range and 2% in relative L2.
+    #
+    # The reference follows the persistent kernel's numerical boundary. The
+    # split kernels requantize the intermediate at another one: measured on
+    # these inputs they are as far from the result without any intermediate
+    # rounding as the persistent kernel is (2.7% in relative L2 both), 1.2% to
+    # 1.6% from this reference, and up to 3.7% of the output range on single
+    # outputs. Their bound is 3% in relative L2 and 6% of the range.
     actual, reference = actual.float(), reference.float()
-    bound = 0.02 * float(reference.abs().max())
+    range_bound, l2_bound = (0.06, 0.03) if on_split else (0.02, 0.02)
+    bound = range_bound * float(reference.abs().max())
     assert float((actual - reference).abs().max()) <= bound
     rel_l2 = torch.linalg.norm(actual - reference) / torch.linalg.norm(reference)
-    assert float(rel_l2) <= 0.02
+    assert float(rel_l2) <= l2_bound
 
 
 @pytest.fixture(scope="module")
@@ -290,10 +313,8 @@ def ep_group():
     dist.destroy_process_group()
 
 
-@pytest.fixture(scope="module", params=["routed", "fused_shared"])
-def layer(request, ep_group):
-    rank, world_size = ep_group
-    plan = moe_plan(
+def _plan(world_size: int, solution: str | None) -> dict:
+    return moe_plan(
         "mxfp4",
         input_dtype=torch.bfloat16,
         activation="swiglu",
@@ -312,9 +333,27 @@ def layer(request, ep_group):
         fast_math=True,
         combine_order="rank",
         features=frozenset(),
-        solution="mega_moe",
+        solution=solution,
     )
-    assert plan["apply_kernel_name"] == "flashinfer_mxfp4_mega_moe_apply"
+
+
+def _on_split(plan: dict) -> bool:
+    return plan["apply_kernel_name"] == SPLIT_KERNEL
+
+
+@pytest.fixture(scope="module", params=["routed", "fused_shared", "split"])
+def layer(request, ep_group):
+    rank, world_size = ep_group
+    if request.param == "split":
+        if not mega_moe_sm120_split.available():
+            pytest.skip("the installed FlashInfer has no split MegaMoE on NCCL")
+        plan = _plan(world_size, "mega_moe_split")
+        assert _on_split(plan)
+        # The split kernels run the routed experts only.
+        assert plan["fuse_shared_expert"] is None
+    else:
+        plan = _plan(world_size, "mega_moe")
+        assert plan["apply_kernel_name"] == "flashinfer_mxfp4_mega_moe_apply"
     w = _Experts(rank, world_size)
     moe_process_weights(plan, w)
     shared = None
@@ -325,7 +364,10 @@ def layer(request, ep_group):
     yield plan, w, shared, rank, world_size
     torch.cuda.synchronize()
     dist.barrier()
-    destroy_flashinfer_mxfp4_mega_moe(w)
+    if _on_split(plan):
+        destroy_flashinfer_mxfp4_mega_moe_split(w)
+    else:
+        destroy_flashinfer_mxfp4_mega_moe(w)
 
 
 def _apply(plan, w, x, weights, ids, bound):
@@ -347,12 +389,14 @@ def test_output_matches_reference(layer, bound):
     x, weights, ids = _inputs(_rows(rank, world_size, bound), seed=100 * bound + rank)
     out = _apply(plan, w, x, weights, ids, bound)
     assert out.shape == x.shape and out.dtype == torch.bfloat16
-    _assert_close(out, _reference(x, weights, ids, shared))
+    _assert_close(out, _reference(x, weights, ids, shared), _on_split(plan))
 
 
 def test_row_counts_exchanged_by_the_kernel_match_a_given_bound(layer):
     """Without a bound the kernel all-gathers the row counts itself."""
     plan, w, _, rank, world_size = layer
+    if _on_split(plan):
+        pytest.skip("the split kernels exchange no row counts")
     x, weights, ids = _inputs(_rows(rank, world_size, 64), seed=300 + rank)
     exchanged = _apply(plan, w, x, weights, ids, None).clone()
     # The exact largest row count reproduces the exchanged task layout.
@@ -379,7 +423,53 @@ def test_cuda_graph_replay_matches_eager(layer):
         replayed = captured.clone()
         eager = _apply(plan, w, *fresh, bound)
         assert torch.equal(replayed, eager)
-        _assert_close(replayed, _reference(*fresh, shared))
+        _assert_close(replayed, _reference(*fresh, shared), _on_split(plan))
+
+
+def test_split_graphs_of_two_row_buckets_replay_in_turn(layer):
+    """Captured graphs of two buckets share the workspace.
+
+    The larger bound selects a bucket that only the warmup has launched, as
+    the graph of a batch size does that no eager forward ran before capture.
+    """
+    plan, w, shared, rank, world_size = layer
+    if not _on_split(plan):
+        pytest.skip("covers the split kernels")
+    graphs = []
+    for bound in (300, 16):
+        tokens = _rows(rank, world_size, bound)
+        static = _inputs(tokens, seed=1000 + bound + rank)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = _apply(plan, w, *static, bound)
+        graphs.append((bound, tokens, static, graph, captured))
+    torch.cuda.synchronize()
+    dist.barrier()
+    for step in range(2):
+        for bound, tokens, static, graph, captured in graphs:
+            fresh = _inputs(tokens, seed=1100 + 10 * step + bound + rank)
+            for target, source in zip(static, fresh):
+                target.copy_(source)
+            graph.replay()
+            _assert_close(captured.clone(), _reference(*fresh, shared), on_split=True)
+
+
+def test_expert_id_map_routes_logical_ids_to_slots(layer):
+    """``plan["expert_id_map"]``: staging maps the routed ids to placed slots."""
+    plan, w, shared, rank, world_size = layer
+    # The same permutation on every rank.
+    slot_of = torch.randperm(EXPERTS, generator=torch.Generator().manual_seed(1234))
+    slot_of = slot_of.to(device="cuda", dtype=torch.int32)
+    bound = 16
+    x, weights, ids = _inputs(_rows(rank, world_size, bound), seed=1300 + rank)
+    plan["expert_id_map"] = slot_of
+    try:
+        out = _apply(plan, w, x, weights, ids, bound)
+    finally:
+        del plan["expert_id_map"]
+    # The layer's weights sit in slot order: the routes reach those experts.
+    placed = slot_of[ids.long()]
+    _assert_close(out, _reference(x, weights, placed, shared), _on_split(plan))
 
 
 def test_token_count_does_not_recompile_staging(layer):
@@ -397,9 +487,40 @@ def test_token_count_does_not_recompile_staging(layer):
             run(bound)
 
 
+def test_split_kernels_run_the_workspace_capacity_without_a_bound(layer):
+    """No bound selects the capacity bucket; the rows are the same either way."""
+    plan, w, shared, rank, world_size = layer
+    if not _on_split(plan):
+        pytest.skip("covers the split kernels")
+    x, weights, ids = _inputs(_rows(rank, world_size, 64), seed=900 + rank)
+    unbounded = _apply(plan, w, x, weights, ids, None).clone()
+    _assert_close(unbounded, _reference(x, weights, ids, shared), on_split=True)
+
+
 def test_more_tokens_than_the_workspace_holds_is_refused(layer):
     plan, w, _, _, _ = layer
     x, weights, ids = _inputs(MAX_TOKENS + 1, seed=800)
     # Refused on the host before any launch, so the ranks stay in step.
     with pytest.raises(ValueError, match="workspace holds"):
         _apply(plan, w, x, weights, ids, MAX_TOKENS)
+    if _on_split(plan):
+        # The bound selects the row bucket, so the rows must fit under it.
+        x, weights, ids = _inputs(17, seed=801)
+        with pytest.raises(ValueError, match="under a row bound"):
+            _apply(plan, w, x, weights, ids, 16)
+
+
+def test_split_kernels_are_selected_by_their_solution_only(ep_group):
+    """A plan that names no solution stays off the split kernels."""
+    _, world_size = ep_group
+    assert not _on_split(_plan(world_size, None))
+    assert not _on_split(_plan(world_size, "mega_moe"))
+
+
+def test_split_kernels_need_an_even_top_k():
+    assert mega_moe_sm120_split.supports_top_k(TOP_K)
+    # The DSpark draft model routes to three experts.
+    assert not mega_moe_sm120_split.supports_top_k(3)
+    # Refused when the weights are processed, before anything is built.
+    with pytest.raises(ValueError, match="even top-k"):
+        flashinfer_mxfp4_mega_moe_split_process_weights({}, SimpleNamespace(top_k=3))

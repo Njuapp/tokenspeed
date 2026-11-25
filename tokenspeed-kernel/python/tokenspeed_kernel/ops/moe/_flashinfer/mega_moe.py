@@ -125,12 +125,15 @@ def _swiglu_limit(w: torch.nn.Module) -> int:
     return int(limit)
 
 
-def flashinfer_mxfp4_mega_moe_process_weights(
-    plan: dict,
-    w: torch.nn.Module,
-) -> object:
-    """Put the routed MXFP4 weights in the kernel's gate/up row order, in place."""
-    _row_capacity(plan)
+def _order_checkpoint_weights(w: torch.nn.Module) -> torch.device:
+    """Check the routed MXFP4 tensors and put gate/up in the kernels' row order.
+
+    In place. The persistent kernel and the split kernels
+    (``mega_moe_split.py``) take the same row order.
+
+    Returns:
+        The device the tensors are on.
+    """
     w13_weight = w.w13_weight.data
     tensors = (
         w13_weight,
@@ -154,10 +157,21 @@ def flashinfer_mxfp4_mega_moe_process_weights(
             raise ValueError("MegaMoE checkpoint tensors must be on the same device")
         if tensor.dtype != torch.uint8:
             raise ValueError(f"MegaMoE {name} must have dtype uint8")
-    # Scales stay in checkpoint order; the kernel's scale layout is derived
-    # from them once the shared expert is known.
+    # Scales stay in checkpoint order; a kernel derives its own scale layout
+    # from them when its layer is built.
     _interleave_gate_up_(w13_weight.view(torch.int8), 8)
-    state = _FlashinferMegaMoEState(device=w13_weight.device, shared=None, layer=None)
+    return w13_weight.device
+
+
+def flashinfer_mxfp4_mega_moe_process_weights(
+    plan: dict,
+    w: torch.nn.Module,
+) -> object:
+    """Put the routed MXFP4 weights in the kernel's gate/up row order, in place."""
+    _row_capacity(plan)
+    state = _FlashinferMegaMoEState(
+        device=_order_checkpoint_weights(w), shared=None, layer=None
+    )
     w._moe_backend_state = state
     return state
 
@@ -260,12 +274,7 @@ def warmup_flashinfer_mxfp4_mega_moe(plan: dict, w: torch.nn.Module) -> None:
     buffers = _get_staging_buffers(state.device, capacity, w.hidden_size, w.top_k)
     # One zero row routed to the first experts: enough to allocate the
     # workspace, load the kernel and encode this layer's weight descriptors.
-    buffers.x_fp8[:1].view(torch.uint8).zero_()
-    buffers.x_scale[:1].fill_(0x7F7F7F7F)
-    buffers.topk_ids[:1].copy_(
-        torch.arange(w.top_k, device=state.device) % w.num_experts
-    )
-    buffers.topk_weights[:1].fill_(1.0 / w.top_k)
+    _stage_warmup_row(buffers, w)
     mega_moe_sm120.warmup(
         layer,
         buffers.x_fp8[:1],
@@ -274,6 +283,16 @@ def warmup_flashinfer_mxfp4_mega_moe(plan: dict, w: torch.nn.Module) -> None:
         buffers.topk_weights[:1],
     )
     state.layer = layer
+
+
+def _stage_warmup_row(buffers: _StagingBuffers, w: torch.nn.Module) -> None:
+    """Stage one zero row routed to the layer's first experts."""
+    buffers.x_fp8[:1].view(torch.uint8).zero_()
+    buffers.x_scale[:1].fill_(0x7F7F7F7F)
+    buffers.topk_ids[:1].copy_(
+        torch.arange(w.top_k, device=buffers.topk_ids.device) % w.num_experts
+    )
+    buffers.topk_weights[:1].fill_(1.0 / w.top_k)
 
 
 def destroy_flashinfer_mxfp4_mega_moe(w: torch.nn.Module) -> None:
@@ -313,7 +332,60 @@ def flashinfer_mxfp4_mega_moe_run(
         rows, including the shared expert when it is fused.
     """
     state = _state(w)
-    if x.device != state.device:
+    capacity = _row_capacity(plan)
+    num_tokens = _check_inputs(state.device, capacity, x, w, topk_weights, topk_ids)
+    if state.layer is None:
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "Warm up the FlashInfer MegaMoE on every EP rank before CUDA "
+                "graph capture"
+            )
+        warmup_flashinfer_mxfp4_mega_moe(plan, w)
+    buffers = _get_staging_buffers(state.device, capacity, w.hidden_size, w.top_k)
+    _stage_inputs(plan, buffers, x, w, topk_weights, topk_ids)
+    output = torch.empty_like(x, dtype=torch.bfloat16)
+    # plan["before_kernel_launch"]: optional callback a caller arms for one
+    # forward, run once the inputs are staged and before the kernel launch
+    # (see mega_moe_sm120.run). Absent by default.
+    before_launch = plan.get("before_kernel_launch")
+    if before_launch is None:
+        mega_moe_sm120.run(
+            state.layer,
+            buffers.x_fp8[:num_tokens],
+            buffers.x_scale[:num_tokens].view(torch.uint8),
+            buffers.topk_ids[:num_tokens],
+            buffers.topk_weights[:num_tokens],
+            max_tokens_per_rank=max_num_tokens_per_gpu,
+            output=output,
+        )
+    else:
+        mega_moe_sm120.run(
+            state.layer,
+            buffers.x_fp8[:num_tokens],
+            buffers.x_scale[:num_tokens].view(torch.uint8),
+            buffers.topk_ids[:num_tokens],
+            buffers.topk_weights[:num_tokens],
+            max_tokens_per_rank=max_num_tokens_per_gpu,
+            output=output,
+            before_launch=before_launch,
+        )
+    return output
+
+
+def _check_inputs(
+    device: torch.device,
+    capacity: int,
+    x: torch.Tensor,
+    w: torch.nn.Module,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+) -> int:
+    """Check one forward's inputs against the layer.
+
+    Returns:
+        The rows of this rank.
+    """
+    if x.device != device:
         raise ValueError("MegaMoE inputs and processed weights must share a device")
     if x.ndim != 2 or x.shape[1] != w.hidden_size:
         raise ValueError(
@@ -325,20 +397,24 @@ def flashinfer_mxfp4_mega_moe_run(
         raise ValueError(f"topk_weights must have shape {expected_routing_shape}")
     if topk_ids is None or tuple(topk_ids.shape) != expected_routing_shape:
         raise ValueError(f"topk_ids must have shape {expected_routing_shape}")
-    capacity = _row_capacity(plan)
     if num_tokens > capacity:
         raise ValueError(
             f"FlashInfer MegaMoE got {num_tokens} tokens, but its workspace "
             f"holds {capacity}"
         )
-    if state.layer is None:
-        if torch.cuda.is_current_stream_capturing():
-            raise RuntimeError(
-                "Warm up the FlashInfer MegaMoE on every EP rank before CUDA "
-                "graph capture"
-            )
-        warmup_flashinfer_mxfp4_mega_moe(plan, w)
-    buffers = _get_staging_buffers(state.device, capacity, w.hidden_size, w.top_k)
+    return num_tokens
+
+
+def _stage_inputs(
+    plan: dict,
+    buffers: _StagingBuffers,
+    x: torch.Tensor,
+    w: torch.nn.Module,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+) -> None:
+    """Quantize this rank's rows and write the kernel inputs into ``buffers``."""
+    num_tokens = x.shape[0]
     # A permuted expert placement (plan["expert_id_map"], int32 logical id ->
     # slot): the weights were loaded into the placed slots, so the ids the
     # kernel receives must name slots. The staging launch maps them.
@@ -372,30 +448,3 @@ def flashinfer_mxfp4_mega_moe_run(
             buffers.topk_weights[:num_tokens],
             expert_id_map,
         )
-    output = torch.empty_like(x, dtype=torch.bfloat16)
-    # plan["before_kernel_launch"]: optional callback a caller arms for one
-    # forward, run once the inputs are staged and before the kernel launch
-    # (see mega_moe_sm120.run). Absent by default.
-    before_launch = plan.get("before_kernel_launch")
-    if before_launch is None:
-        mega_moe_sm120.run(
-            state.layer,
-            buffers.x_fp8[:num_tokens],
-            buffers.x_scale[:num_tokens].view(torch.uint8),
-            buffers.topk_ids[:num_tokens],
-            buffers.topk_weights[:num_tokens],
-            max_tokens_per_rank=max_num_tokens_per_gpu,
-            output=output,
-        )
-    else:
-        mega_moe_sm120.run(
-            state.layer,
-            buffers.x_fp8[:num_tokens],
-            buffers.x_scale[:num_tokens].view(torch.uint8),
-            buffers.topk_ids[:num_tokens],
-            buffers.topk_weights[:num_tokens],
-            max_tokens_per_rank=max_num_tokens_per_gpu,
-            output=output,
-            before_launch=before_launch,
-        )
-    return output

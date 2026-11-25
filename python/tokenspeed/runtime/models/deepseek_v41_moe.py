@@ -83,7 +83,12 @@ def mega_moe_fused_shared_requested() -> bool:
 # expert id -> placed slot), by the name the kernel plan reports. Every other
 # kernel stages the routed ids as they are and would address the slot
 # numbered like the logical expert.
-_EXPERT_ID_MAP_KERNELS = frozenset({"flashinfer_mxfp4_mega_moe_apply"})
+_EXPERT_ID_MAP_KERNELS = frozenset(
+    {
+        "flashinfer_mxfp4_mega_moe_apply",
+        "flashinfer_mxfp4_mega_moe_split_apply",
+    }
+)
 
 # EP process groups whose ranks this process has compared; see
 # DeepseekV4MoE._check_ep_group_agreement. The entries keep the groups alive,
@@ -504,8 +509,9 @@ class DeepseekV4MoE(nn.Module):
             raise ValueError(
                 f"{EXPERT_PLACEMENT_ENV}: the selected MoE kernel ({kernel}) does "
                 "not map routed expert ids to placed slots. An expert placement "
-                "file needs --moe-backend mega_moe resolving to one of "
-                f"{sorted(_EXPERT_ID_MAP_KERNELS)}; unset the variable otherwise."
+                "file needs --moe-backend mega_moe or mega_moe_split resolving to "
+                f"one of {sorted(_EXPERT_ID_MAP_KERNELS)}; unset the variable "
+                "otherwise."
             )
 
     def _check_ep_group_agreement(self) -> None:

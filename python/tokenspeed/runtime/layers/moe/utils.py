@@ -84,6 +84,9 @@ class MoeBackend(Enum):
     DEEP_GEMM = "deep_gemm"
     DEEP_GEMM_MEGA_MOE = "deep_gemm_mega_moe"
     MEGA_MOE = "mega_moe"
+    # FlashInfer's CuTe DSL split MegaMoE (SM120, MXFP4 experts): the same
+    # runner path as MEGA_MOE on another kernel, chosen per deployment.
+    MEGA_MOE_SPLIT = "mega_moe_split"
 
     @classmethod
     def _missing_(cls, value):
@@ -131,7 +134,11 @@ class MoeBackend(Enum):
         return self == MoeBackend.DEEP_GEMM_MEGA_MOE
 
     def is_mega_moe(self):
-        return self in (MoeBackend.MEGA_MOE, MoeBackend.DEEP_GEMM_MEGA_MOE)
+        return self in (
+            MoeBackend.MEGA_MOE,
+            MoeBackend.DEEP_GEMM_MEGA_MOE,
+            MoeBackend.MEGA_MOE_SPLIT,
+        )
 
 
 class DeepEPMode(Enum):

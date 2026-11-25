@@ -566,6 +566,34 @@ also writes the activation scales the shared expert reads: MN-major, with rows
 grouped by the BLOCK_M MegaMoE picks for the token count. The shared expert's
 SwiGLU uses the routed experts' clamp.
 
+## FlashInfer SM120 split MegaMoE (`_flashinfer/mega_moe_split.py`)
+
+Solution `mega_moe_split`, kernel `flashinfer_mxfp4_mega_moe_split_apply`: a
+second MegaMoE for the MXFP4 checkpoint layout of the SM120 `mega_moe` kernel
+(`_flashinfer/mega_moe.py`), on FlashInfer's CuTe DSL split kernels. A launch
+runs three kernels instead of one persistent kernel: dispatch + FC1 and FC2 +
+return at the same time on two Green Context partitions of the GPU, then the
+top-k reduce. The EP ranks exchange rows over the kernels' own NCCL session.
+
+- It is a solution of its own and `mega_moe` never selects it. Every launch of
+  a layer built on it runs the split kernels, whatever its row count.
+- Which kernel is faster depends on the rows per launch and on how the routes
+  spread over the experts (the split kernels gain while each active expert
+  receives few rows), so the choice belongs to the deployment and is made by
+  measuring both on its own traffic.
+- Routed experts only: the plan has no `fuse_shared_expert`, and the caller
+  keeps the shared expert on its own path.
+- The kernels are compiled per row bucket. Warmup launches every bucket of the
+  workspace's capacity once, because a bucket cannot compile under CUDA graph
+  capture; `max_num_tokens_per_gpu` selects a launch's bucket.
+- The top-k must be even: the kernels push a row's route weights to the peer
+  GPUs in 8-byte words. Weight processing raises otherwise.
+- Input staging is the persistent kernel's, so `plan["expert_id_map"]` (an
+  expert placement file, with or without replicas) applies. FlashInfer serves
+  at most 64 expert slots per rank on an EP group that spans NUMA nodes.
+- `mega_moe_transport` does not apply: the kernels choose load/store or
+  GPU-initiated networking per pair of ranks themselves.
+
 ## Kimi-K3 TP8 decode chain (`_cute_dsl/k3_decode.py`)
 
 On Blackwell with one TP8 group shared by attention and MoE, a decode forward
