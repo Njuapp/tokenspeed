@@ -36,12 +36,14 @@ only behaviour that changes is the first item.
    launch graphs (start-up time and device memory). Note that a 24-row bucket is below the default packing
    threshold of 32 rows: without item 2 it is slower than the default 32-row bucket. In an engine, items 2 and 3
    together shortened the decode step by 1.8% and 4.0% at 1 and 2 requests per rank, changed nothing at 4, 8 and
-   32 and lengthened it by 2.1% at 16 (synthetic tokens, permutation placement, one run each); on real text they
-   gave 1.2% and 3.0% more output at 1 and 2 requests per GPU and 2.7% less at 16. The 96-row bucket is faster
-   on balanced routes only: leave it out for traffic around 16 requests per GPU.
+   32 and lengthened it by 2.1% at 16 (synthetic tokens, permutation placement, one run each; with 4 replica
+   slots per rank the 96-row bucket made no difference); on real text they gave 1.2% and 3.0% more output at 1
+   and 2 requests per GPU and 2.7% less at 16. The 96-row bucket is faster on balanced routes only: leave it out
+   for traffic around 16 requests per GPU.
 
 All three must have the same value on every EP rank. `../switch-sets/d7-same-split-ep16.sh` sets items 2 and 3
-as the engine runs used them, except that it leaves the 96-row bucket out.
+without the 96-row bucket. The step-time matrix of `../docs/EP16_SPLIT_RESULTS.md` (section 5.1) ran with that
+list; the real-text runs had all six buckets.
 
 Checked with the patch: FlashInfer's host tests of this backend (61 pass, with and without the variables),
 TokenSpeed's multi-rank kernel test on 16 ranks over two nodes (27 pass, 5 skipped; the log shows which buckets

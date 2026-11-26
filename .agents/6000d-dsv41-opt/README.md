@@ -57,9 +57,11 @@ solved for the workload (2026-11-26):
 
 - Real text (8192-token prompts, real DSpark acceptance): the split backend gives 15.6% / 16.6% / 14.5% / 5.6%
   more output at 1 / 2 / 4 / 8 requests per GPU and 4.2% / 9.8% less at 16 / 24.
-- Synthetic tokens of the step-time measurement, whose routes are far more concentrated: with a permutation the
-  split backend's decode step is 17% / 15% / 11% shorter at 1 / 2 / 4 requests per GPU and 3% to 30% longer from 8;
-  with 4 replica slots per rank it is 18% / 16% / 13% / 3% shorter up to 8 and 5% / 16% longer at 16 / 32.
+- Synthetic tokens of the step-time measurement, whose routes are far more concentrated (six engines under
+  identical conditions, placements solved from held-out inputs): without a placement the split backend's decode
+  step is 15% / 9% shorter at 1 / 2 requests per GPU, about equal at 4 and 16% to 34% longer from 8; with a
+  permutation it is 17% / 15% / 10% shorter at 1 / 2 / 4 and 4% to 31% longer from 8; with 4 replica slots per
+  rank it is 18% / 16% / 13% / 3% shorter up to 8 and 6% / 17% longer at 16 / 32.
 
 So the backend is a choice per deployment: the split kernels for low concurrency per GPU, the persistent kernel
 for high. The reason is the routing: on balanced routes the split kernels are faster up to about 144 rows per

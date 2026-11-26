@@ -133,27 +133,31 @@ spread evenly, so that number is not a median of three).
 
 *Two nodes (EP16), synthetic tokens, static placement.* The step-time measurement described below feeds random
 tokens (131072-token context, simulated acceptance length 6). Their routes are far more concentrated than those
-of real text: without a placement the busiest rank receives 2.88 times the mean, a permutation brings that to
-1.74 only, 4 replica slots per rank to 1.09. Decode step (ms), 2026-11-26; the split backend with compile buckets
-at the six decode row counts and every bucket packing:
+of real text: without a placement the busiest rank receives 2.87 times the mean, a permutation brings that to
+1.73 only, 4 replica slots per rank to 1.09. Six engines ran one after another on 2026-11-26 with one variable
+changed at a time: the same FlashInfer checkout, code, `ts serve` arguments, `d7-same.sh` and inputs (identical
+input hashes at every point); they differ in the backend, in the placement file and, on the split backend, in the
+two settings of `../switch-sets/d7-same-split-ep16.sh`. The placements are solved from a load profile of other
+inputs (another seed of the request tails), so the measured inputs took no part in them. Decode step (ms):
 
 | Requests per rank | 1 | 2 | 4 | 8 | 16 | 32 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `mega_moe`, no placement | 30.49 | 31.73 | 35.18 | 40.83 | 53.80 | 81.97 |
-| `mega_moe`, permutation | 30.80 | 32.04 | 35.01 | 38.60 | 48.14 | 68.77 |
-| `mega_moe`, 4 replicas per rank | 32.24 | 33.46 | 35.87 | 38.70 | 45.15 | 60.09 |
-| `mega_moe_split`, permutation | 25.50 | 27.14 | 31.23 | 39.92 | 55.02 | 89.64 |
-| `mega_moe_split`, 4 replicas per rank | 26.54 | 28.13 | 31.16 | 37.42 | 47.58 | 69.73 |
+| `mega_moe`, no placement | 30.37 | 31.64 | 35.06 | 40.68 | 53.72 | 81.42 |
+| `mega_moe`, permutation | 30.79 | 32.02 | 34.83 | 38.48 | 48.19 | 68.83 |
+| `mega_moe`, 4 replicas per rank | 32.22 | 33.59 | 35.94 | 38.71 | 45.21 | 59.97 |
+| `mega_moe_split`, no placement | 25.86 | 28.70 | 34.60 | 47.28 | 62.94 | 108.80 |
+| `mega_moe_split`, permutation | 25.52 | 27.10 | 31.21 | 39.94 | 53.72 | 90.19 |
+| `mega_moe_split`, 4 replicas per rank | 26.53 | 28.11 | 31.14 | 37.53 | 47.94 | 70.01 |
 
-With a placement the split backend leads at low concurrency and the persistent kernel at high. With the
-permutation the split backend's step is 17.2% / 15.3% / 10.8% shorter at 1 / 2 / 4 requests per rank and 3.4% /
-14.3% / 30.3% longer from 8. With 4 replica slots per rank, which balance this workload much better, it is 17.7% /
-15.9% / 13.1% / 3.3% shorter up to 8 and 5.4% / 16.0% longer at 16 and 32. Replicas cost both backends 1 to 1.4 ms
-at 1 and 2 requests per rank. Two more split readings with the permutation: with the default compile buckets and
-packing threshold 25.98 / 28.27 / 31.32 / 40.09 / 53.90 / 89.67 ms, so the extra buckets with every bucket packing
-are worth 1.8% and 4.0% at 1 and 2 requests per rank, nothing at 4, 8 and 32, and cost 2.1% at 16 (one run each);
-and on FlashInfer `0dc6f0785abd`, without the packed dispatch and without a placement, 26.33 / 29.64 / 37.11 /
-52.30 / 72.80 / 123.66 ms.
+The split backend leads at low concurrency and the persistent kernel at high, and the better the placement
+balances the load the later they cross. Without a placement the split backend's step is 14.9% / 9.3% / 1.3%
+shorter at 1 / 2 / 4 requests per rank and 16.2% / 17.2% / 33.6% longer from 8. With the permutation it is 17.1% /
+15.4% / 10.4% shorter up to 4 and 3.8% / 11.5% / 31.0% longer from 8. With 4 replica slots per rank it is 17.7% /
+16.3% / 13.4% / 3.0% shorter up to 8 and 6.0% / 16.7% longer at 16 and 32. Replicas cost both backends 1.0 to 1.6 ms
+at 1 and 2 requests per rank against the permutation and pay from 8 (split) or 16 (persistent) requests per rank. The two formal rounds of a run differ by at
+most 1.2%. Earlier runs of the day, with placements solved from the measured inputs themselves, read the same
+within 0.5% on the persistent kernel; they and the readings with other compile buckets, without the packed
+dispatch and on FlashInfer `0dc6f0785abd` are in section 5.2 of `../docs/EP16_SPLIT_RESULTS.md`.
 
 *One node (EP8), earlier readings* (FlashInfer `0dc6f0785abd`, no expert placement, `d7-same.sh`). Real text,
 output tokens per second of the node:
@@ -242,13 +246,15 @@ tuned table (microseconds):
 
 In an engine their effect is smaller and not uniform: the 6- and 12-row buckets help (1 and 2 requests per GPU:
 1.2% and 3.0% more output on real text, 1.8% and 4.0% shorter steps on synthetic tokens), the 24-, 48- and
-192-row buckets change nothing, and the 96-row bucket costs at 16 requests per GPU on both workloads (2.7% less
-output, 2.1% longer steps), although it is 3.3% faster on balanced routes.
-`../switch-sets/d7-same-split-ep16.sh` therefore sets the packing threshold and the buckets without 96
-(`6,12,24,48,192`; 96 rows then run the default 128-row bucket); that list itself has not run in an engine. The
-buckets also cost start-up time (871 instead of 691 s to ready on real text) and memory: an engine with these 18
-buckets (step-time launch, KV pool of 524288 tokens) peaked at 79.3 GB of the 85.65 GB of a GPU, and at 82.4 GB
-with 4 replica slots per rank.
+192-row buckets change nothing, and the 96-row bucket costs at 16 requests per GPU (2.7% less output on real
+text, 2.1% longer steps on synthetic tokens with a permutation, no difference there with 4 replica slots per
+rank), although it is 3.3% faster on balanced routes. `../switch-sets/d7-same-split-ep16.sh` therefore sets the
+packing threshold and the buckets without 96 (`6,12,24,48,192`; 96 rows then run the default 128-row bucket).
+The step-time matrix above ran with that list, the real-text runs with all six buckets. The buckets also cost
+start-up time (871 instead of 691 s to ready on real text, six buckets) and memory: an engine with the switch
+set's buckets (step-time launch, KV pool of 524288 tokens) peaked at 78.7 GB of the 85.65 GB of a GPU, and at
+81.9 GB with 4 replica slots per rank (79.3 and 82.4 GB with the 96-row bucket as well; the persistent kernel:
+68.4 and 71.4 GB).
 
 What to know about the table:
 
@@ -283,9 +289,9 @@ What to know about the table:
   ready after 8 to 11 minutes instead of 6 (14 minutes when the kernels of a configuration compile for the first
   time) and held 6.5 GB more per GPU with the tuned table and 7.0 GB with the rule-based selection (free memory
   after graph capture with a KV pool of 524288 tokens: 20.2 GB on the persistent kernel, 13.7 and 13.3 GB on the
-  split kernels; 13.0 GB with the tuned table and the default pool). The six extra compile buckets of
-  the runs above add to both: that engine peaked at 79.3 GB of the 85.65 GB of a GPU with a permutation
-  placement and at 82.4 GB with 4 replica slots per rank (step-time launch, KV pool of 524288 tokens), so check
+  split kernels; 13.0 GB with the tuned table and the default pool). The extra compile buckets of
+  `d7-same-split-ep16.sh` add to both: that engine peaked at 78.7 GB of the 85.65 GB of a GPU with a permutation
+  placement and at 81.9 GB with 4 replica slots per rank (step-time launch, KV pool of 524288 tokens), so check
   the headroom before adding replicas or a larger pool.
 - Prefill-sized forwards run the split kernels too, and are slower on them. That is why this backend is meant
   for decode engines.
@@ -312,7 +318,7 @@ What to know about the table:
 
 `decode-step-engine.sh` is the engine for a step-time measurement with a fixed number of requests per rank; its
 header lists what differs from the gold-standard launch. Our readings with it, for comparison with yours:
-two nodes, 16 ranks, `d7-same.sh`, context 131072 tokens, fixed acceptance length 6, rank 0, mean of 100 step
+two nodes, 16 ranks, `d7-same.sh`, context 131072 tokens, simulated acceptance length 6, rank 0, mean of 100 step
 intervals after dropping the 20 smallest and the 20 largest.
 
 | Requests per rank | 1 | 2 | 4 | 8 | 16 | 32 |

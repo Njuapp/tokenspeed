@@ -52,12 +52,26 @@ over the ranks and `EVEN_RESULT`, the number we quote) and the device memory at 
 
 ## `steptime/` (decode step in milliseconds, the step-time measurement of `launch/README.md`)
 
-`steptime.txt`: one line per run with the trimmed mean step per number of requests per rank, then each run's
-settings and `ts serve` command line, then the peak device memory of the split runs. In the settings, tree
-`all13` is this branch at commit `78d60c9` and `all15` is the same code with the kernel table of this commit;
-the switch files are `d7-same.sh` plus the placement file and, for the `b6p` runs,
-`MEGAMOE_EXTRA_COMPILE_BUCKETS=6,12,24,48,96,192` and `MEGAMOE_XNUMA_PACK_MIN_TOKENS=6` (the switch set
-`switch-sets/d7-same-split-ep16.sh` of this branch leaves 96 out).
+`steptime.txt` is the matrix of section 5.1 of the document: six engines under identical conditions (two
+backends, three placements) and the run that recorded the load profile behind the placements. It has one line
+per run with the trimmed mean step per number of requests per rank, each formal round alone, then per run the
+settings, the environment its switch file exports, the `ts serve` command line, short hashes of its inputs (equal
+in the six runs, different in the profile run) and the peak device memory. In the settings, tree `all16` is this
+branch (code and kernel table) and `all13` is the same code with an earlier kernel table, which the persistent
+kernel does not read.
+
+| Run | Backend and settings |
+| --- | --- |
+| `c16p-cake-none-1126a` | Persistent kernel, no placement, no load profile |
+| `c16s-cake-r0-1126a`, `c16s-cake-r4-1126a` | Persistent kernel with the held-out permutation placement and with 4 replica slots per rank |
+| `c16p-split-none-1126a` | Split kernels with the two settings of `switch-sets/d7-same-split-ep16.sh` (buckets `6,12,24,48,192`, every bucket packs), no placement |
+| `c16p-split-r0-1126a`, `c16p-split-r4-1126a` | The same with the two held-out placements |
+| `c16s-cake-prof-1126a` | Persistent kernel with the load profile on and other request tails: the profile of the held-out placements, not a benchmark |
+
+`earlier-runs.txt`: the runs before the matrix (section 5.2), in the same form without the input hashes. Their
+placements were solved from a load profile of the measured inputs themselves. Tree `all15` is `all13` with a
+kernel table that has the 96-row anchor and the 448-slot copy; the `b6p` runs set
+`MEGAMOE_EXTRA_COMPILE_BUCKETS=6,12,24,48,96,192` and `MEGAMOE_XNUMA_PACK_MIN_TOKENS=6`.
 
 | Run | Backend and settings |
 | --- | --- |
@@ -71,4 +85,6 @@ the switch files are `d7-same.sh` plus the placement file and, for the `b6p` run
 
 The placement files of the two workloads (`realtext-*`, `steptime-*`; `r0` = permutation, `r4` = 4 replica slots
 per rank) and the solver's reports (per layer: busiest rank over the mean before and after, share of routes
-that cross GPUs). They belong to these workloads; solve your own for other traffic (`../../placement/`).
+that cross GPUs). `steptime-heldout-*` are solved from a load profile of other inputs and belong to the matrix;
+`steptime-r0` and `steptime-r4` are solved from the measured inputs themselves and belong to the earlier runs.
+They belong to these workloads; solve your own for other traffic (`../../placement/`).
