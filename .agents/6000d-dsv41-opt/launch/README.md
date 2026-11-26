@@ -125,8 +125,8 @@ TPOT goes from 9.73 / 11.17 / 12.01 / 13.54 / 15.91 / 18.32 ms to 8.42 / 9.59 / 
 The split run used the tuned table and the packed dispatch with the default compile buckets; without the table
 it reads 1766 / 3068 / 5508 / 9155 / 13902 / 16272 tokens per second, without the packed dispatch 1899 / 3336 /
 5709 / 8978 / 13080 / 15818. So on real text the split backend is ahead up to 8 requests per GPU and behind
-from 16. A rerun with `../switch-sets/d7-same-split-ep16.sh` (compile buckets at the decode row counts, every
-bucket packing) reads 1924 / 3437 / 6122 / 10032 / 14998 / 18916: 1.2% and 3.0% more at 1 and 2 requests per GPU,
+from 16. A rerun with compile buckets at the six decode row counts and every bucket packing (see "Compile
+buckets" below) reads 1924 / 3437 / 6122 / 10032 / 14998 / 18916: 1.2% and 3.0% more at 1 and 2 requests per GPU,
 2.7% less at 16, no change elsewhere. At 12 requests per GPU, measured in that run and in one more of the
 persistent kernel, the two backends tie (about 13195 against 13099; only two of the split run's five waves were
 spread evenly, so that number is not a median of three).
@@ -134,8 +134,8 @@ spread evenly, so that number is not a median of three).
 *Two nodes (EP16), synthetic tokens, static placement.* The step-time measurement described below feeds random
 tokens (131072-token context, simulated acceptance length 6). Their routes are far more concentrated than those
 of real text: without a placement the busiest rank receives 2.88 times the mean, a permutation brings that to
-1.74 only, 4 replica slots per rank to 1.09. Decode step (ms), 2026-11-26, `../switch-sets/d7-same-split-ep16.sh`
-for the split backend:
+1.74 only, 4 replica slots per rank to 1.09. Decode step (ms), 2026-11-26; the split backend with compile buckets
+at the six decode row counts and every bucket packing:
 
 | Requests per rank | 1 | 2 | 4 | 8 | 16 | 32 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -240,13 +240,15 @@ tuned table (microseconds):
 | Own buckets, every bucket packs | 498.6 | 519.6 | 533.4 | 607.7 | 754.5 | 1232.5 |
 | Difference | -1.3% | -5.9% | -0.5% | -0.3% | -3.3% | -0.9% |
 
-`../switch-sets/d7-same-split-ep16.sh` sets both. In an engine their effect is smaller and not uniform: the 6-
-and 12-row buckets help (1 and 2 requests per GPU: 1.2% and 3.0% more output on real text, 1.8% and 4.0% shorter
-steps on synthetic tokens), the 24-, 48- and 192-row buckets change nothing, and the 96-row bucket costs at 16
-requests per GPU on both workloads (2.7% less output, 2.1% longer steps), although it is 3.3% faster on balanced
-routes. Leave 96 out of the list if you serve around 16 requests per GPU. The buckets also cost start-up time
-(871 instead of 691 s to ready on real text) and memory: an engine with these 18 buckets (step-time launch, KV pool of 524288 tokens)
-peaked at 79.3 GB of the 85.65 GB of a GPU, and at 82.4 GB with 4 replica slots per rank.
+In an engine their effect is smaller and not uniform: the 6- and 12-row buckets help (1 and 2 requests per GPU:
+1.2% and 3.0% more output on real text, 1.8% and 4.0% shorter steps on synthetic tokens), the 24-, 48- and
+192-row buckets change nothing, and the 96-row bucket costs at 16 requests per GPU on both workloads (2.7% less
+output, 2.1% longer steps), although it is 3.3% faster on balanced routes.
+`../switch-sets/d7-same-split-ep16.sh` therefore sets the packing threshold and the buckets without 96
+(`6,12,24,48,192`; 96 rows then run the default 128-row bucket); that list itself has not run in an engine. The
+buckets also cost start-up time (871 instead of 691 s to ready on real text) and memory: an engine with these 18
+buckets (step-time launch, KV pool of 524288 tokens) peaked at 79.3 GB of the 85.65 GB of a GPU, and at 82.4 GB
+with 4 replica slots per rank.
 
 What to know about the table:
 
@@ -282,7 +284,7 @@ What to know about the table:
   time) and held 6.5 GB more per GPU with the tuned table and 7.0 GB with the rule-based selection (free memory
   after graph capture with a KV pool of 524288 tokens: 20.2 GB on the persistent kernel, 13.7 and 13.3 GB on the
   split kernels; 13.0 GB with the tuned table and the default pool). The six extra compile buckets of
-  `d7-same-split-ep16.sh` add to both: that engine peaked at 79.3 GB of the 85.65 GB of a GPU with a permutation
+  the runs above add to both: that engine peaked at 79.3 GB of the 85.65 GB of a GPU with a permutation
   placement and at 82.4 GB with 4 replica slots per rank (step-time launch, KV pool of 524288 tokens), so check
   the headroom before adding replicas or a larger pool.
 - Prefill-sized forwards run the split kernels too, and are slower on them. That is why this backend is meant

@@ -46,7 +46,7 @@ over the ranks and `EVEN_RESULT`, the number we quote) and the device memory at 
 | `rt16-split-r0-1126a` | Split kernels: tuned table, packed dispatch, default buckets, permutation placement |
 | `rt16-splitrule-r0-1126a` | The same with the rule-based selection instead of the table |
 | `rt16-splitnopack-r0-1126a` | The same as the first with the packed dispatch off |
-| `rt16-split-r0-b6-1126a` | Split kernels with `d7-same-split-ep16.sh` (buckets at 6 x 2^N rows, every bucket packs), permutation placement; adds 12 requests per GPU (CC 192), where only two waves were spread evenly |
+| `rt16-split-r0-b6-1126a` | Split kernels with buckets at the six row counts 6, 12, 24, 48, 96, 192 and every bucket packing, permutation placement; adds 12 requests per GPU (CC 192), where only two waves were spread evenly |
 | `rt16-cake-r0-c192-1126a` | Persistent kernel at 12 requests per GPU, permutation placement |
 
 
@@ -55,8 +55,9 @@ over the ranks and `EVEN_RESULT`, the number we quote) and the device memory at 
 `steptime.txt`: one line per run with the trimmed mean step per number of requests per rank, then each run's
 settings and `ts serve` command line, then the peak device memory of the split runs. In the settings, tree
 `all13` is this branch at commit `78d60c9` and `all15` is the same code with the kernel table of this commit;
-the switch files are `d7-same.sh` plus the placement file and, for the `b6p` runs, the two variables of
-`switch-sets/d7-same-split-ep16.sh`.
+the switch files are `d7-same.sh` plus the placement file and, for the `b6p` runs,
+`MEGAMOE_EXTRA_COMPILE_BUCKETS=6,12,24,48,96,192` and `MEGAMOE_XNUMA_PACK_MIN_TOKENS=6` (the switch set
+`switch-sets/d7-same-split-ep16.sh` of this branch leaves 96 out).
 
 | Run | Backend and settings |
 | --- | --- |

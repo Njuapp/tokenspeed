@@ -216,8 +216,9 @@ decode 每步耗时（毫秒）：
 
 - FlashInfer：`flashinfer/README.md` 的提交加补丁。
 - 开关集：常驻 kernel 用 `switch-sets/d7-same.sh`；split 用 `switch-sets/d7-same-split-ep16.sh`
-  （加桶，所有桶打包），启动时 `OPT_MOE_BACKEND=mega_moe_split`。桶列表按自己的并发裁剪：6 和 12 行有收益，
-  24、48、192 行持平，96 行在端到端上是负收益。
+  （加桶，所有桶打包），启动时 `OPT_MOE_BACKEND=mega_moe_split`。开关集里的桶是 6、12、24、48、192 行，
+  不含 96：6 和 12 行有收益，24、48、192 行持平，96 行在端到端上是负收益，去掉后 96 行跑默认的 128 行桶。
+  上面的引擎结果是带 96 的六个桶跑的，去掉 96 的这个列表本身没有单独跑过引擎。
 - 放置：按自己的流量录画像、求解（`placement/README.md`），两个后端都设
   `TOKENSPEED_MOE_EXPERT_PLACEMENT`。
 - 选后端：没有运行时自动切换，一个引擎只跑一种。按上面两节的交叉点和自己的并发来选，最好在自己的流量上

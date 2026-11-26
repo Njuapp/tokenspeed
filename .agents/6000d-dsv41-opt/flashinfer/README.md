@@ -41,7 +41,7 @@ only behaviour that changes is the first item.
    on balanced routes only: leave it out for traffic around 16 requests per GPU.
 
 All three must have the same value on every EP rank. `../switch-sets/d7-same-split-ep16.sh` sets items 2 and 3
-the way the engine runs used them.
+as the engine runs used them, except that it leaves the 96-row bucket out.
 
 Checked with the patch: FlashInfer's host tests of this backend (61 pass, with and without the variables),
 TokenSpeed's multi-rank kernel test on 16 ranks over two nodes (27 pass, 5 skipped; the log shows which buckets
