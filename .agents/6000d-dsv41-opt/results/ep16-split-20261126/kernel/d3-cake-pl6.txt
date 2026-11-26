@@ -1,0 +1,7 @@
+rc=0,0
+CAKERESULT {"tokens": 6, "route": "power_law", "samples": 1, "rounds": 100, "table": "all_gin", "calls": null, "p50_us": 555.01, "mean_us": 570.92, "tmean_us": 555.21, "min_us": 550.91, "p10_us": 552.96, "p90_us": 557.06, "max_us": 1349.63}
+CAKERESULT {"tokens": 12, "route": "power_law", "samples": 1, "rounds": 100, "table": "all_gin", "calls": null, "p50_us": 632.83, "mean_us": 632.24, "tmean_us": 632.12, "min_us": 626.69, "p10_us": 628.76, "p90_us": 634.88, "max_us": 653.34}
+CAKERESULT {"tokens": 24, "route": "power_law", "samples": 1, "rounds": 100, "table": "all_gin", "calls": null, "p50_us": 696.29, "mean_us": 710.04, "tmean_us": 696.4, "min_us": 692.19, "p10_us": 694.24, "p90_us": 700.42, "max_us": 1959.9}
+CAKERESULT {"tokens": 48, "route": "power_law", "samples": 1, "rounds": 100, "table": "all_gin", "calls": null, "p50_us": 814.08, "mean_us": 835.05, "tmean_us": 813.95, "min_us": 802.78, "p10_us": 806.91, "p90_us": 821.25, "max_us": 2000.9}
+CAKERESULT {"tokens": 96, "route": "power_law", "samples": 1, "rounds": 100, "table": "all_gin", "calls": null, "p50_us": 1038.34, "mean_us": 1037.62, "tmean_us": 1037.9, "min_us": 1013.76, "p10_us": 1024.0, "p90_us": 1048.58, "max_us": 1056.77}
+CAKERESULT {"tokens": 192, "route": "power_law", "samples": 1, "rounds": 100, "table": "all_gin", "calls": null, "p50_us": 1464.29, "mean_us": 1467.48, "tmean_us": 1464.22, "min_us": 1445.86, "p10_us": 1452.0, "p90_us": 1474.79, "max_us": 1789.95}

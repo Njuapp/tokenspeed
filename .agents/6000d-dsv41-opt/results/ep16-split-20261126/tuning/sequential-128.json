@@ -1,0 +1,179 @@
+{
+ "entries": [
+  {
+   "tokens": 128,
+   "rule": "sequential",
+   "knobs": {
+    "backend": "p2p_split",
+    "fc1_utility_postprocess": "on",
+    "k1_stages": 3,
+    "k2_n": 32,
+    "k2_tail_reclaim": "on",
+    "weight_eviction_policy": "evict_first",
+    "weight_prefetch_ahead": 0,
+    "sms": [
+     120,
+     0,
+     0,
+     36
+    ],
+    "k1_t0_prefetch": 64,
+    "k1_ctas_per_sm": 1
+   },
+   "us": {
+    "balanced": 863.58,
+    "power_law": 1344.91
+   },
+   "default_us": {
+    "balanced": 1017.25,
+    "power_law": 1681.04
+   },
+   "start": "default",
+   "power_law_trials": {
+    "default": [
+     1680.8,
+     1681.04,
+     1682.0
+    ],
+    "best": [
+     1340.93,
+     1344.91,
+     1349.1
+    ],
+    "shipped": [
+     1342.13,
+     1346.29,
+     1352.77
+    ]
+   },
+   "steps": [
+    {
+     "candidate": "generic_decode",
+     "change": {
+      "balanced": -6.43,
+      "power_law": -17.08
+     },
+     "mean_us": [
+      1349.1,
+      1172.8
+     ]
+    },
+    {
+     "candidate": "extra6",
+     "change": {
+      "balanced": -6.66,
+      "power_law": -2.99
+     },
+     "mean_us": [
+      1172.8,
+      1120.3
+     ]
+    },
+    {
+     "candidate": "shipped128",
+     "change": {
+      "balanced": -2.82,
+      "power_law": -0.44
+     },
+     "mean_us": [
+      1120.3,
+      1104.9
+     ]
+    },
+    {
+     "candidate": "k1_ctas_per_sm=1",
+     "change": {
+      "balanced": 0.02,
+      "power_law": -0.1
+     },
+     "mean_us": [
+      1104.9,
+      1104.2
+     ]
+    }
+   ],
+   "tested": {
+    "considered": 36,
+    "excluded": 29,
+    "not_faster": 3
+   },
+   "against_default_pct": {
+    "balanced": -15.11,
+    "power_law": -20.0
+   },
+   "score_pct": -17.55,
+   "mean_us": {
+    "default": 1349.1,
+    "best": 1104.2
+   },
+   "old_balanced_reused": false,
+   "shipped_us": {
+    "balanced": 863.44,
+    "power_law": 1346.29
+   },
+   "shipped_against_default_pct": {
+    "balanced": -15.12,
+    "power_law": -19.91
+   },
+   "against_shipped_pct": {
+    "balanced": 0.02,
+    "power_law": -0.1
+   },
+   "confirm": {
+    "seed": 6197,
+    "best_us": {
+     "balanced": 871.87,
+     "power_law": 1377.58
+    },
+    "default_us": {
+     "balanced": 1026.77,
+     "power_law": 1381.92
+    },
+    "against_default_pct": {
+     "balanced": -15.09,
+     "power_law": -0.31
+    },
+    "shipped_us": {
+     "balanced": 871.66,
+     "power_law": 1375.78
+    },
+    "against_shipped_pct": {
+     "balanced": 0.02,
+     "power_law": 0.13
+    }
+   },
+   "trials_run": 38,
+   "minutes": 24.4
+  }
+ ],
+ "schema": 1,
+ "model": "dsv41",
+ "signature": [
+  5120,
+  4608,
+  6,
+  384
+ ],
+ "ep": 16,
+ "topology": "ep16_2x2numa",
+ "device": [
+  156,
+  8,
+  8
+ ],
+ "protocol": {
+  "timing": "pr_timing whole_graph",
+  "cold_l2": true,
+  "warmup": 20,
+  "rounds": 100,
+  "seed": 9341,
+  "routes": [
+   "balanced",
+   "power_law"
+  ],
+  "power_law_exponent": 1.0,
+  "max_regress": 0.005,
+  "min_gain": 0.005,
+  "rule": "the default is the first baseline; a candidate more than max_regress slower than the current baseline on either route is excluded; otherwise it becomes the baseline if the average of its two times is lower"
+ }
+}

@@ -16,6 +16,11 @@ Branch `opt/6000d-dsv41`, two commits on top of upstream `ee5b468f1`:
 | `switch-sets/` | The switch combination of each tier, as sourced by the engine launch |
 | `launch/` | The engine launch scripts behind every number, and the settings a benchmark of this branch must keep |
 | `placement/` | How to solve a static expert placement (with or without replicas) for a workload |
+| `docs/EP16_SPLIT_RESULTS.md` | The second MegaMoE backend on two nodes: kernel tuning on two route distributions, packed dispatch, compile buckets, real-text and step-time results with a static placement (Chinese) |
+| `flashinfer/` | The FlashInfer patch the two-node readings of the second backend need, and what it changes |
+| `tuning/` | The kernel tuner (balanced and power-law routes) and the kernel-level timing scripts |
+| `realtext/` | The real-text decode measurement: prompt bank, client, how a run goes |
+| `results/ep16-split-20261126/` | Raw files of those results |
 | `results/timelines/` | Per-kernel time and launch counts per step from Nsight Systems captures, before and after |
 
 ## Results (gold standards of the handoff, two nodes of 8x RTX 6000D)
@@ -45,15 +50,24 @@ workload and is not in this branch; another workload needs its own (`placement/R
 
 ## A second MegaMoE backend for decode
 
-A later commit adds `--moe-backend mega_moe_split`: the MoE layers on FlashInfer's CuTe DSL split kernels instead
-of its persistent kernel. It is opt-in, changes nothing for `mega_moe`, and is faster or slower depending on the
-load, the routing of the traffic and the expert placement (first readings on one node, EP8: 16% more output on
-real text at 2 requests per GPU and 5% more at 8; on synthetic tokens without an expert placement, whose routes
-are far more concentrated, 8% to 9% shorter decode steps at 1 to 4 requests per GPU and longer steps from 8).
-For two nodes (EP16) the branch carries a tuned kernel table for the split kernels: against FlashInfer's
-rule-based selection their decode step is 3% to 11% shorter (synthetic tokens, 1 to 32 requests per GPU). Against
-`mega_moe` the split backend is then 13% and 6% shorter at 1 and 2 requests per GPU and 6% to 51% longer from 4.
-`launch/README.md` has the launch, the FlashInfer source it needs and what to know before switching.
+`--moe-backend mega_moe_split` runs the MoE layers on FlashInfer's CuTe DSL split kernels instead of its
+persistent kernel. It is opt-in, changes nothing for `mega_moe`, and is faster or slower depending on the load,
+the routing of the traffic and the expert placement. On two nodes (EP16), both backends with a static placement
+solved for the workload (2026-11-26):
+
+- Real text (8192-token prompts, real DSpark acceptance): the split backend gives 15.6% / 16.6% / 14.5% / 5.6%
+  more output at 1 / 2 / 4 / 8 requests per GPU and 4.2% / 9.8% less at 16 / 24.
+- Synthetic tokens of the step-time measurement, whose routes are far more concentrated: with a permutation the
+  split backend's decode step is 17% / 15% / 11% shorter at 1 / 2 / 4 requests per GPU and 3% to 30% longer from 8;
+  with 4 replica slots per rank it is 18% / 16% / 13% / 3% shorter up to 8 and 5% / 16% longer at 16 / 32.
+
+So the backend is a choice per deployment: the split kernels for low concurrency per GPU, the persistent kernel
+for high. The reason is the routing: on balanced routes the split kernels are faster up to about 144 rows per
+rank, on power-law routes only up to 16, and no kernel configuration changes that. The branch carries what the
+split backend needs at EP16: a kernel table (tuned on balanced and on power-law routes), and, as a patch for
+FlashInfer, the packed dispatch between NUMA nodes and hosts (6.9% to 19.5% more output on real text from 4
+requests per GPU) and compile buckets at the row counts of DSpark decode steps. `launch/README.md` has the
+launch and what to know before switching, `docs/EP16_SPLIT_RESULTS.md` the full results.
 
 ## Launch requirements
 

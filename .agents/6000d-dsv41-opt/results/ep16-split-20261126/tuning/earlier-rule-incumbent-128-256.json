@@ -1,0 +1,167 @@
+{
+ "entries": [
+  {
+   "tokens": 128,
+   "knobs": {
+    "backend": "p2p_split",
+    "fc1_utility_postprocess": "on",
+    "k1_stages": 3,
+    "k2_n": 32,
+    "k2_tail_reclaim": "on",
+    "weight_eviction_policy": "evict_first",
+    "weight_prefetch_ahead": 0,
+    "sms": [
+     120,
+     0,
+     0,
+     36
+    ],
+    "k1_t0_prefetch": 64
+   },
+   "us": {
+    "balanced": 863.44,
+    "power_law": 1352.77
+   },
+   "default_us": {
+    "balanced": 1017.25,
+    "power_law": 1682.0
+   },
+   "start": "shipped128",
+   "steps": [],
+   "against_default_pct": {
+    "balanced": -15.12,
+    "power_law": -19.57
+   },
+   "score_pct": -17.35,
+   "old_balanced_reused": false,
+   "shipped_us": {
+    "balanced": 863.44,
+    "power_law": 1352.77
+   },
+   "shipped_against_default_pct": {
+    "balanced": -15.12,
+    "power_law": -19.57
+   },
+   "against_shipped_pct": {
+    "balanced": 0.0,
+    "power_law": 0.0
+   },
+   "confirm": {
+    "seed": 6197,
+    "best_us": {
+     "balanced": 871.66,
+     "power_law": 1377.49
+    },
+    "default_us": {
+     "balanced": 1026.77,
+     "power_law": 1381.89
+    },
+    "against_default_pct": {
+     "balanced": -15.11,
+     "power_law": -0.32
+    }
+   },
+   "trials_run": 48,
+   "minutes": 28.2
+  },
+  {
+   "tokens": 256,
+   "knobs": {
+    "backend": "p2p_split",
+    "k2_warps": 8
+   },
+   "us": {
+    "balanced": 1600.4,
+    "power_law": 2796.88
+   },
+   "default_us": {
+    "balanced": 1601.57,
+    "power_law": 2876.54
+   },
+   "start": "default",
+   "steps": [
+    {
+     "knob": "k2_warps",
+     "value": 8,
+     "change": {
+      "balanced": -0.07,
+      "power_law": -2.77
+     }
+    }
+   ],
+   "against_default_pct": {
+    "balanced": -0.07,
+    "power_law": -2.77
+   },
+   "score_pct": -1.42,
+   "old_balanced_reused": true,
+   "shipped_us": {
+    "balanced": 1423.87,
+    "power_law": 2984.24
+   },
+   "shipped_against_default_pct": {
+    "balanced": -11.1,
+    "power_law": 3.74
+   },
+   "against_shipped_pct": {
+    "balanced": 12.4,
+    "power_law": -6.28
+   },
+   "confirm": {
+    "seed": 6197,
+    "best_us": {
+     "balanced": 1599.34,
+     "power_law": 2940.34
+    },
+    "default_us": {
+     "balanced": 1605.22,
+     "power_law": 2864.02
+    },
+    "against_default_pct": {
+     "balanced": -0.37,
+     "power_law": 2.66
+    },
+    "shipped_us": {
+     "balanced": 1426.93,
+     "power_law": 2824.98
+    },
+    "against_shipped_pct": {
+     "balanced": 12.08,
+     "power_law": 4.08
+    }
+   },
+   "trials_run": 59,
+   "minutes": 44.6
+  }
+ ],
+ "schema": 1,
+ "model": "dsv41",
+ "signature": [
+  5120,
+  4608,
+  6,
+  384
+ ],
+ "ep": 16,
+ "topology": "ep16_2x2numa",
+ "device": [
+  156,
+  8,
+  8
+ ],
+ "protocol": {
+  "timing": "pr_timing whole_graph",
+  "cold_l2": true,
+  "warmup": 20,
+  "rounds": 100,
+  "seed": 9341,
+  "routes": [
+   "balanced",
+   "power_law"
+  ],
+  "power_law_exponent": 1.0,
+  "max_regress": 0.005,
+  "min_gain": 0.005,
+  "rule": "excluded if slower than the incumbent or the default by more than max_regress on either route; score = mean relative change"
+ }
+}

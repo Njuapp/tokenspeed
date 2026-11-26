@@ -1,0 +1,12 @@
+[tune2] T=256 power_law ok p50=3032.8 {"backend": "p2p_split"}
+[tune2] T=256 power_law ok p50=3062.3 {"backend": "p2p_split"}
+[aa] T=256 default power_law [3032.8, 3062.34]
+[tune2] T=256 power_law ok p50=2977.7 {"backend": "p2p_split", "k1_stages": 3, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first"}
+[tune2] T=256 power_law ok p50=2943.4 {"backend": "p2p_split", "k1_stages": 3, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first"}
+[aa] T=256 shipped power_law [2977.71, 2943.44]
+[tune2] T=128 power_law ok p50=1681.0 {"backend": "p2p_split"}
+[tune2] T=128 power_law ok p50=1680.8 {"backend": "p2p_split"}
+[aa] T=128 default power_law [1681.04, 1680.8]
+[tune2] T=128 power_law ok p50=1349.1 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 power_law ok p50=1352.2 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[aa] T=128 shipped power_law [1349.12, 1352.19]

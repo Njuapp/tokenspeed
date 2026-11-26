@@ -33,8 +33,9 @@ optimizations gain.
 | `qcp-engine.sh` | Prefill gold standard QCP8 (one node, one request over 8 GPUs, MoE EP8) |
 | `decode-engine.sh` | Decode gold standard D16 (two nodes, attention DP16, MoE EP16), or one node |
 | `decode-step-engine.sh` | Decode step time at a fixed number of requests per rank (1 to 32) |
+| `realtext-engine.sh` | Decode engine of the real-text measurement (`../realtext/`): HTTP gateway, real acceptance |
 
-Both decode scripts take `OPT_MOE_BACKEND` (`mega_moe`, the default, or `mega_moe_split`); see
+The three decode scripts take `OPT_MOE_BACKEND` (`mega_moe`, the default, or `mega_moe_split`); see
 "Two MegaMoE backends for decode".
 
 Site variables: `OPT_TREE`, `OPT_VENV`, `OPT_FLASHINFER_SRC`, `OPT_MODEL`, and for the prefill scripts
@@ -100,13 +101,58 @@ names the option.
 
 **FlashInfer.** The split kernels are not in upstream `656eaee45`. `OPT_FLASHINFER_SRC` must be a checkout that
 ships them on FlashInfer's NCCL transport; ours is `https://github.com/Euynaheh/flashinfer`, branch
-`sm120-w4a8-megamoe`, commit `0dc6f0785abd`, with its submodules. Both backends run from that checkout: the
-persistent kernel reads the same step times on it as on `656eaee45`.
+`sm120-w4a8-megamoe`, with its submodules. The two-node readings below used commit `1ecb6730b549` with the patch
+of `../flashinfer/` (packed dispatch at EP16, optional compile buckets); the one-node readings used commit
+`0dc6f0785abd`. Both backends run from that checkout: the persistent kernel reads the same step times on it as
+on `656eaee45`.
 
-**What to expect.** It depends on the traffic. Readings so far, one node, attention DP8, MoE EP8, `d7-same.sh`:
+**What to expect.** It depends on the traffic and on the expert placement; `../docs/EP16_SPLIT_RESULTS.md` has
+the full results and the method (Chinese), `../results/ep16-split-20261126/` the raw files.
 
-*Real text* (8192-token prompts, 1024 output tokens, greedy, the real DSpark acceptance, closed loop), output
-tokens per second of the node:
+*Two nodes (EP16), real text, static placement.* The workload of `../realtext/` (8192-token prompts, 1024 output
+tokens, greedy, the real DSpark acceptance, closed waves), `d7-same.sh`, both backends with the same placement
+file (a permutation solved from a held-out prompt bank; real text needs no replicas: the busiest rank receives
+1.99 times the mean without a placement and 1.01 times with it). Output tokens per second of the 16 GPUs,
+2026-11-26:
+
+| Requests per GPU | 1 | 2 | 4 | 8 | 16 | 24 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `mega_moe` | 1644 | 2864 | 5330 | 9456 | 16093 | 20963 |
+| `mega_moe_split` | 1901 | 3338 | 6103 | 9990 | 15422 | 18899 |
+| Difference | +15.6% | +16.6% | +14.5% | +5.6% | -4.2% | -9.8% |
+
+TPOT goes from 9.73 / 11.17 / 12.01 / 13.54 / 15.91 / 18.32 ms to 8.42 / 9.59 / 10.49 / 12.81 / 16.60 / 20.32 ms.
+The split run used the tuned table and the packed dispatch with the default compile buckets; without the table
+it reads 1766 / 3068 / 5508 / 9155 / 13902 / 16272 tokens per second, without the packed dispatch 1899 / 3336 /
+5709 / 8978 / 13080 / 15818. So on real text the split backend is ahead up to 8 requests per GPU and behind
+from 16.
+
+*Two nodes (EP16), synthetic tokens, static placement.* The step-time measurement described below feeds random
+tokens (131072-token context, simulated acceptance length 6). Their routes are far more concentrated than those
+of real text: without a placement the busiest rank receives 2.88 times the mean, a permutation brings that to
+1.74 only, 4 replica slots per rank to 1.09. Decode step (ms), 2026-11-26, `../switch-sets/d7-same-split-ep16.sh`
+for the split backend:
+
+| Requests per rank | 1 | 2 | 4 | 8 | 16 | 32 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `mega_moe`, no placement | 30.49 | 31.73 | 35.18 | 40.83 | 53.80 | 81.97 |
+| `mega_moe`, permutation | 30.80 | 32.04 | 35.01 | 38.60 | 48.14 | 68.77 |
+| `mega_moe`, 4 replicas per rank | 32.24 | 33.46 | 35.87 | 38.70 | 45.15 | 60.09 |
+| `mega_moe_split`, permutation | 25.50 | 27.14 | 31.23 | 39.92 | 55.02 | 89.64 |
+| `mega_moe_split`, 4 replicas per rank | 26.54 | 28.13 | 31.16 | 37.42 | 47.58 | 69.73 |
+
+With a placement the split backend leads at low concurrency and the persistent kernel at high. With the
+permutation the split backend's step is 17.2% / 15.3% / 10.8% shorter at 1 / 2 / 4 requests per rank and 3.4% /
+14.3% / 30.3% longer from 8. With 4 replica slots per rank, which balance this workload much better, it is 17.7% /
+15.9% / 13.1% / 3.3% shorter up to 8 and 5.4% / 16.0% longer at 16 and 32. Replicas cost both backends 1 to 1.4 ms
+at 1 and 2 requests per rank. Two more split readings with the permutation: with the default compile buckets and
+packing threshold 25.98 / 28.27 / 31.32 / 40.09 / 53.90 / 89.67 ms, so the extra buckets with every bucket packing
+are worth 1.8% and 4.0% at 1 and 2 requests per rank, nothing at 4, 8 and 32, and cost 2.1% at 16 (one run each);
+and on FlashInfer `0dc6f0785abd`, without the packed dispatch and without a placement, 26.33 / 29.64 / 37.11 /
+52.30 / 72.80 / 123.66 ms.
+
+*One node (EP8), earlier readings* (FlashInfer `0dc6f0785abd`, no expert placement, `d7-same.sh`). Real text,
+output tokens per second of the node:
 
 | Requests per GPU | 2 | 8 | 16 |
 | --- | ---: | ---: | ---: |
@@ -116,13 +162,9 @@ tokens per second of the node:
 
 The column for 2 requests per GPU is `mega_moe_split` as in this branch (TPOT 10.0 against 11.6 ms). The other
 two columns come from an earlier build that ran the split kernels for the decode forwards and the persistent
-kernel for prefill; the backend itself is being measured at those loads.
-
-*Synthetic tokens without an expert placement*, the least favourable case for the split kernels. The step-time
-measurement described below feeds random tokens (131072-token context, fixed acceptance length 6). Their routes
-are far more concentrated than those of real text: one expert takes about 12% of a layer's routes, a layer's
-routes reach about 43 of its 384 experts at one request per rank, and with the default placement the busiest GPU
-receives about twice the mean number of rows. Decode step (ms), 2026-11-25:
+kernel for prefill. Synthetic tokens of the step-time measurement without a placement, the least favourable
+case for the split kernels (one expert takes about 12% of a layer's routes and the busiest GPU receives about
+twice the mean), decode step (ms), 2026-11-25:
 
 | Requests per rank | 1 | 2 | 4 | 8 | 16 | 32 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -130,88 +172,92 @@ receives about twice the mean number of rows. Decode step (ms), 2026-11-25:
 | `mega_moe_split` | 26.76 | 28.91 | 33.20 | 42.26 | 56.41 | 83.53 |
 | Difference | -8.7% | -8.7% | -7.6% | +4.9% | +14.9% | +25.0% |
 
-The split kernels gain while each active expert receives few rows, and a GPU that receives twice the mean costs
-them more than it costs the persistent kernel. A balanced expert placement (`../placement/`) therefore helps
-them more: in a kernel-level replay of these routes, the MoE time of the split kernels against the persistent
-kernel went from -18% / -17% / -11% / +6% / +22% / +43% at 1 / 2 / 4 / 8 / 16 / 32 requests per rank with the
-default placement to -19% / -19% / -16% / -2% / +14% / +36% with the experts rebalanced over the GPUs (no
-replicas). Engine results with a static placement, for both backends, will be added here.
+**Why the answer depends on the routes.** One MoE launch at EP16 (microseconds; the slowest of the 16 ranks,
+median of 100 launches after an L2 flush; the persistent kernel without the shared expert), on balanced routes
+(every expert receives the same number of rows) and on power-law routes (Zipf exponent 1.0, no placement):
 
-**Two nodes (EP16): a tuned kernel table.** FlashInfer takes the split kernels' configuration for a row bucket
-(tiles, pipeline stages, the SM split between the two concurrent kernels, cache hints) from tables measured per
-model and setup, and selects by rule where it has none. Commit `0dc6f0785abd` has tables for the RTX 6000D (156
-SMs) at EP4 and EP8 and none for EP16 over two hosts, so a `dep16` engine ran the rule-based selection. This
-branch carries a table for that setup (`mega_moe_sm120_split_tuned.json` in
+| Rows per rank | 16 | 32 | 64 | 96 | 128 | 256 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Persistent kernel, balanced | 704.5 | 735.2 | 827.4 | 888.8 | 915.5 | 1183.7 |
+| Split kernels, balanced | 554.1 | 558.0 | 658.9 | 754.5 | 875.0 | 1435.0 |
+| Persistent kernel, power-law | 682.0 | 749.5 | 876.5 | 1038.3 | 1175.6 | 1720.3 |
+| Split kernels, power-law | 570.3 | 835.5 | 1067.8 | 1143.4 | 1344.9 | about 2980 |
+
+On balanced routes the split kernels win up to 144 rows per rank; on power-law routes they lose from 32 rows,
+and no kernel configuration we tried changes that (at 128 rows the fastest of 23 configurations reads 1315
+microseconds on power-law routes). Real traffic with a placement sits between the two.
+
+**Two nodes (EP16): a tuned kernel table, packed dispatch, compile buckets.** FlashInfer takes the split
+kernels' configuration for a row bucket (tiles, pipeline stages, the SM split between the two concurrent
+kernels, cache hints) from tables measured per model and setup, and selects by rule where it has none. It has
+tables for the RTX 6000D (156 SMs) at EP4 and EP8 and none for EP16 over two hosts. This branch carries a table
+for that setup (`mega_moe_sm120_split_tuned.json` in
 `tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/flashinfer/`) and adds it to FlashInfer's lookup before
 the first layer is built. Nothing changes in the launch; the engine log names the table ("Split MegaMoE: tuned
-kernel tables added to FlashInfer's: ..."). FlashInfer's notes at this commit say that FlashInfer itself does not
-run these kernels at EP16; on two nodes the backend is covered by this branch's multi-rank kernel test (run on
-16 ranks, with its reference check) and by the engine runs below.
+kernel tables added to FlashInfer's: ..."). On two nodes the backend is covered by this branch's multi-rank
+kernel test (run on 16 ranks, with its reference check) and by the engine runs above.
 
-It was measured with the tuning tools of the kernels' authors (`tune_table.py` with the kernels' standalone
-runner; they are not part of the FlashInfer checkout) at EP16 over the two nodes: coordinate descent per anchor,
-median of 100 launches after an L2 flush, balanced routes (every expert receives the same number of rows), a
-second route seed to confirm, for 16, 32, 64, 128 and 256 rows per rank. Every anchor was then timed through this
-backend with balanced routes and with decode routes recorded from the engine, with a reference check of the
-output. One anchor differs from the tuner's choice: at 32 rows the knobs of the 64-row anchor are about 10% faster
-on the recorded decode routes and no slower on balanced routes. Buckets above 256 rows keep the rule-based
-selection.
+*How the table was tuned.* With the tuning tools of the kernels' authors (their standalone runner; not part of
+the FlashInfer checkout) at EP16 over the two nodes. First, 2026-11-25, their coordinate descent on balanced
+routes for 16, 32, 64, 128 and 256 rows per rank. Then, 2026-11-26, with `../tuning/tune_two_routes.py` on two
+route distributions, balanced and power-law, because a table tuned on balanced routes alone need not be the
+fastest on real traffic: the rule-based default is the first baseline; a candidate that is more than 0.5%
+slower than the current baseline on either distribution is excluded; otherwise it replaces the baseline if the
+mean of its two times is lower. At 128 and at 96 rows per rank that rule ends on the knobs the table already
+had at 128 rows (15% faster than the default on balanced routes, 20% and 11% on power-law routes, where the
+gain depends on the route seed). The table therefore has the same knobs as before plus an anchor at 96 rows.
+The other row counts of a DSpark decode step (6, 12, 24, 48, 192) are not tuned under this rule yet.
 
-One MoE launch at EP16 through this backend (microseconds): the kernel launch without the input staging and the
-output copy, slowest of the 16 ranks, median of 100 launches, balanced routes. A decode step at 1 / 2 / 4 / 8 /
-16 / 32 requests per rank has 6 / 12 / 24 / 48 / 96 / 192 rows per rank and runs the buckets 7 / 16 / 32 / 64 /
-128 / 256.
+*Packed dispatch.* The kernels reach experts on another NUMA node or host over RDMA. The authors' standalone
+runner sends each of those owners only the rows routed to it (from 32 rows per rank at EP16); FlashInfer's
+adapter lacked the sending side, so an engine never packed. The patch of `../flashinfer/` ports it. One MoE
+launch at EP16 through this backend (microseconds, balanced routes):
 
 | Row bucket | 7 | 16 | 32 | 64 | 128 | 168 | 256 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Rule-based selection | 609.7 | 660.5 | 750.4 | 904.5 | 1258.9 | 1456.7 | 2050.5 |
-| Tuned table | 520.8 | 552.4 | 611.7 | 768.8 | 1106.7 | 1298.8 | 1883.7 |
-| Difference | -14.6% | -16.4% | -18.5% | -15.0% | -12.1% | -10.8% | -8.1% |
+| Rule-based selection, no packing | 609.7 | 658.9 | 750.4 | 903.6 | 1261.2 | 1456.5 | 2049.8 |
+| Tuned table, no packing | 521.8 | 552.1 | 611.2 | 768.5 | 1105.9 | 1298.9 | 1880.3 |
+| Rule-based selection, packing | 610.8 | 658.3 | 695.6 | 792.8 | 1027.0 | 1157.9 | 1598.9 |
+| Tuned table, packing | 517.6 | 554.1 | 558.0 | 658.9 | 875.0 | 997.7 | 1435.0 |
 
-On the recorded decode routes of the step-time workload (synthetic tokens, concentrated routes), the sum over
-the same 800 MoE launches (20 decode steps of 40 layers) at 1 / 2 / 4 / 8 / 16 / 32 requests per rank changes by
--10.0% / -13.5% / -12.4% / -12.2% / -15.6% / -2.3%.
+The table was tuned without packing; the authors' tuner with packing selects the same knobs at 16, 64, 128 and
+256 rows (at 32 rows ours are 0.7% faster), so the table stays as it is.
 
-Decode step of the engine (ms), two nodes, 16 ranks, `d7-same.sh`, the step-time measurement described below
-(synthetic tokens, no expert placement), 2026-11-26:
+*Compile buckets at the decode row counts.* A decode step at 1 / 2 / 4 / 8 / 16 / 32 requests per rank has
+6 / 12 / 24 / 48 / 96 / 192 rows per rank and runs the default buckets 7 / 16 / 32 / 64 / 128 / 256. With
+`MEGAMOE_EXTRA_COMPILE_BUCKETS=6,12,24,48,96,192` (patch of `../flashinfer/`) each of them runs kernels compiled
+for exactly its rows, and with `MEGAMOE_XNUMA_PACK_MIN_TOKENS=6` every bucket packs (a 24-row bucket is below
+the default packing threshold and is 7% slower than the 32-row bucket without it). One launch, balanced routes,
+tuned table (microseconds):
 
-| Requests per rank | 1 | 2 | 4 | 8 | 16 | 32 |
+| Rows per rank | 6 | 12 | 24 | 48 | 96 | 192 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `mega_moe` | 30.36 | 31.62 | 35.05 | 40.61 | 53.67 | 81.68 |
-| `mega_moe_split`, rule-based selection | 27.45 | 31.23 | 39.85 | 57.22 | 82.23 | 127.31 |
-| `mega_moe_split`, tuned table | 26.33 | 29.64 | 37.11 | 52.30 | 72.80 | 123.66 |
-| Tuned table against rule-based | -4.1% | -5.1% | -6.9% | -8.6% | -11.5% | -2.9% |
-| Tuned table against `mega_moe` | -13.3% | -6.3% | +5.9% | +28.8% | +35.6% | +51.4% |
+| Default buckets | 505.3 | 552.4 | 536.0 | 609.7 | 780.3 | 1243.6 |
+| Own buckets, every bucket packs | 498.6 | 519.6 | 533.4 | 607.7 | 754.5 | 1232.5 |
+| Difference | -1.3% | -5.9% | -0.5% | -0.3% | -3.3% | -0.9% |
 
-The three runs had a KV pool of 524288 tokens (`OPT_MAX_TOTAL_TOKENS`; the script's default is 786432), and the
-two `mega_moe_split` runs pinned the NICs as described below. A repeat of the tuned-table run as
-`decode-step-engine.sh` launches it (default pool, NICs left to NCCL) read 26.41 / 29.76 / 37.10 / 52.32 / 72.76
-/ 123.61 ms.
-
-So on two nodes the table shortens every step of the split backend. On this workload the split backend is ahead
-of the persistent kernel at 1 and 2 requests per rank and behind from 4, with the table (13.3% and 6.3% ahead)
-and without it (9.6% and 1.2%). Real text spreads its routes more, which on one node moved that point up; it is
-not measured on two nodes.
+`../switch-sets/d7-same-split-ep16.sh` sets both. In an engine their effect is smaller and not uniform (the
+step-time readings above: 1.8% and 4.0% shorter steps at 1 and 2 requests per rank, 2.1% longer at 16), and they
+cost start-up time and memory: an engine with these 18 buckets (step-time launch, KV pool of 524288 tokens)
+peaked at 79.3 GB of the 85.65 GB of a GPU, and at 82.4 GB with 4 replica slots per rank.
 
 What to know about the table:
 
 - It applies where FlashInfer's key matches: this model with 384 expert slots, an EP16 group whose P2P domains
   hold 4 GPUs (measured as two hosts of two 4-GPU NUMA nodes) and GPUs with 156 SMs. Any other setup keeps what
-  FlashInfer selects; a placement with replicas has more expert slots and therefore keeps the rule-based
-  selection. The key does not cover the network: ours is four RDMA NICs per node, one per pair of GPUs on the
-  same PCIe switch. On nodes that differ, compare against a run with the table turned off (last item).
-- It was tuned for the dispatch FlashInfer `0dc6f0785abd` runs in an engine. The kernels' standalone runner packs
-  the dispatch to the other NUMA nodes and the other host, by default from 32 rows per rank at EP16; with the
-  rule-based configuration at 64 rows that reads 788.6 against 901.7 microseconds per launch. FlashInfer's
-  adapter at this commit does not use the packed dispatch (`MEGAMOE_XNUMA_PACK` has no effect in an engine), so
-  the tuner ran with packing off. A FlashInfer that packs needs a table tuned with packing (the tuner's default);
-  once FlashInfer ships a table of its own for this setup, that one is used and ours is ignored.
+  FlashInfer selects. The key does not cover the network: ours is four RDMA NICs per node, one per pair of GPUs
+  on the same PCIe switch. On nodes that differ, compare against a run with the table turned off (last item).
+- A placement with replicas has more expert slots (384 plus 16 per replica slot of a rank) and matches no table
+  of the plain model. The file carries a second table for 448 slots (4 replica slots per rank) with the same
+  knobs; it ran in an engine on the step-time workload and is not tuned at that slot count. Any other number of
+  replicas runs FlashInfer's rule-based selection until a table for its slot count is added.
+- The 96-row anchor is used only when FlashInfer compiles a 96-row bucket; with the default buckets 96 rows run
+  the 128-row bucket and its anchor, whose knobs are the same.
 - The kernels reach the other NUMA nodes and the other host over RDMA NICs, which NCCL picks per GPU.
   FlashInfer's `MEGAMOE_GIN_HCA_MAP` pins them instead (one NIC name per GPU of a node, in GPU order). The tuning
-  and the kernel timings above ran with each GPU pinned to the NIC on its PCIe switch and with
-  `NCCL_NVLS_ENABLE=0`. Kernel timings without the two settings (buckets 16, 64, 128 and 256 with balanced routes;
-  2, 8 and 16 requests per rank on the recorded routes) were within 0.3% of those with them, inside the
-  run-to-run spread, so the launch scripts do not set them.
+  ran with each GPU pinned to the NIC on its PCIe switch and with `NCCL_NVLS_ENABLE=0`. Kernel timings without
+  the two settings were within 0.3% of those with them, inside the run-to-run spread, so the launch scripts do
+  not set them.
 - `TOKENSPEED_DISABLE_MEGA_MOE_SPLIT_TUNED_TABLES=1` on every rank runs without it. To use a table of your own,
   see "Tuned kernel tables" in `tokenspeed-kernel/python/tokenspeed_kernel/ops/moe/README.md`.
 
@@ -228,13 +274,18 @@ What to know about the table:
   ready after 8 to 11 minutes instead of 6 (14 minutes when the kernels of a configuration compile for the first
   time) and held 6.5 GB more per GPU with the tuned table and 7.0 GB with the rule-based selection (free memory
   after graph capture with a KV pool of 524288 tokens: 20.2 GB on the persistent kernel, 13.7 and 13.3 GB on the
-  split kernels; 13.0 GB with the tuned table and the default pool).
+  split kernels; 13.0 GB with the tuned table and the default pool). The six extra compile buckets of
+  `d7-same-split-ep16.sh` add to both: that engine peaked at 79.3 GB of the 85.65 GB of a GPU with a permutation
+  placement and at 82.4 GB with 4 replica slots per rank (step-time launch, KV pool of 524288 tokens), so check
+  the headroom before adding replicas or a larger pool.
 - Prefill-sized forwards run the split kernels too, and are slower on them. That is why this backend is meant
   for decode engines.
-- Expert placement files (`TOKENSPEED_MOE_EXPERT_PLACEMENT`, see `../placement/`) apply to both backends. On the
-  split backend this is covered by the kernel test only, not yet by an engine run; FlashInfer serves at most 64
-  expert slots per rank there when the EP group spans NUMA nodes, and it selects its tuned kernel configuration
-  by the total number of expert slots, so a placement with replicas runs its rule-based selection.
+- Expert placement files (`TOKENSPEED_MOE_EXPERT_PLACEMENT`, see `../placement/`) apply to both backends, and
+  both need one to be compared fairly. On the split backend they are covered by the kernel test and by the
+  two-node engine runs above (a permutation on real text; a permutation and 4 replica slots per rank on
+  synthetic tokens). FlashInfer serves at most 64 expert slots per rank there when the EP group spans NUMA
+  nodes, and it selects its tuned kernel configuration by the total number of expert slots (see "What to know
+  about the table").
 
 ## Environment of the measurements
 

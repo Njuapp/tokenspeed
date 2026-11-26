@@ -1,0 +1,7 @@
+rc=0,0
+k6-new T=6 bucket=6 route=balanced table=asis launch p50=503.3 us mean=504.0 tmean=503.4 (min 497.15 p10 501.01 p90 505.53 max 532.0); run p50=513.36 us mean=539.4; check=ok (max_rel_err 0.02258, rel_l2 0.01691); table anchor: T16 from wrapper
+k6-new T=12 bucket=12 route=balanced table=asis launch p50=538.11 us mean=539.05 tmean=538.43 (min 533.95 p10 535.77 p90 541.86 max 564.74); run p50=546.24 us mean=546.99; check=ok (max_rel_err 0.0216, rel_l2 0.01542); table anchor: T16 from wrapper
+k6-new T=24 bucket=24 route=balanced table=asis launch p50=574.91 us mean=586.84 tmean=575.67 (min 570.3 p10 572.89 p90 578.92 max 1651.3); run p50=584.58 us mean=597.47; check=ok (max_rel_err 0.02138, rel_l2 0.01582); table anchor: T32 from wrapper
+k6-new T=48 bucket=48 route=balanced table=asis launch p50=607.65 us mean=618.45 tmean=607.79 (min 605.6 p10 605.66 p90 609.7 max 1605.02); run p50=613.89 us mean=626.0; check=ok (max_rel_err 0.0246, rel_l2 0.01656); table anchor: T64 from wrapper
+k6-new T=96 bucket=96 route=balanced table=asis launch p50=754.5 us mean=769.58 tmean=754.69 (min 748.77 p10 751.01 p90 761.26 max 1754.53); run p50=759.23 us mean=773.71; check=ok (max_rel_err 0.02201, rel_l2 0.01542); table anchor: T96 from wrapper
+k6-new T=192 bucket=192 route=balanced table=asis launch p50=1232.5 us mean=1235.42 tmean=1232.75 (min 1228.19 p10 1230.24 p90 1235.61 max 1455.52); run p50=1237.95 us mean=1244.59; check=ok (max_rel_err 0.02389, rel_l2 0.01743); table anchor: T256 from wrapper

@@ -1,0 +1,3 @@
+rc=0,0
+k6-p6 T=6 bucket=6 route=balanced table=asis launch p50=498.64 us mean=498.61 tmean=498.36 (min 490.91 p10 494.82 p90 501.16 max 515.14); run p50=506.56 us mean=525.54; check=ok (max_rel_err 0.02258, rel_l2 0.01691); table anchor: T16 from wrapper
+k6-p6 T=12 bucket=12 route=balanced table=asis launch p50=519.55 us mean=520.32 tmean=519.41 (min 515.46 p10 516.88 p90 523.68 max 552.0); run p50=527.7 us mean=540.92; check=ok (max_rel_err 0.0216, rel_l2 0.01542); table anchor: T16 from wrapper

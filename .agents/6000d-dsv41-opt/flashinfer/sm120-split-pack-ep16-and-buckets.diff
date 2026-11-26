@@ -1,0 +1,680 @@
+diff --git a/docs/development/environment_variables.md b/docs/development/environment_variables.md
+index 6a0f7e68..a5870984 100644
+--- a/docs/development/environment_variables.md
++++ b/docs/development/environment_variables.md
+@@ -126,6 +126,9 @@ Used by `flashinfer.trace` / `fi_trace`.
+ | `MEGAMOE_NCCL_CACHE` | `<FlashInfer workspace>/megamoe_nccl` | same | Directory of the NCCL host bridge that the `sm120_mxfp4_mxfp8_bf16_cutedsl` transport builds once with `g++`. |
+ | `MEGAMOE_GIN_HCA_MAP` | unset | `flashinfer/moe_ep/kernels/flashinfer/sm120_split/moe_sm120_mxfp4mxfp8_split/transport/nccl/session.py` | Comma-separated HCA per physical GPU index (e.g. `mlx5_3,mlx5_2,...`). The `p2p_split` (cross-NUMA EP) session of `sm120_mxfp4_mxfp8_bf16_cutedsl` sets `NCCL_IB_HCA` to the GPU's entry unless `NCCL_IB_HCA` is already set. |
+ | `MEGAMOE_SYMMETRIC_BYTES` | planned size | same | Overrides the NCCL symmetric arena size of an `sm120_mxfp4_mxfp8_bf16_cutedsl` workspace; it must not be smaller than the planned size. |
++| `MEGAMOE_XNUMA_PACK` | heuristic | `flashinfer/moe_ep/shims/sm120/split_cutedsl/runtime.py` | `0` or `1` turns the packed `p2p_split` dispatch of the `sm120_mxfp4_mxfp8_bf16_cutedsl` backend off or on for every compile bucket (default: EP16 from 32 rows per rank). Set the same value on every EP rank. |
++| `MEGAMOE_XNUMA_PACK_MIN_TOKENS` | heuristic | `flashinfer/moe_ep/shims/sm120/split_cutedsl/runtime.py` | Rows per rank from which the packed `p2p_split` dispatch of the `sm120_mxfp4_mxfp8_bf16_cutedsl` backend is used, for the EP sizes the heuristic packs at all (default: 32 at EP16). Set the same value on every EP rank. |
++| `MEGAMOE_EXTRA_COMPILE_BUCKETS` | empty | `flashinfer/moe_ep/shims/sm120/split_cutedsl/runtime.py` | Comma-separated rows per rank added to the compile buckets of the `sm120_mxfp4_mxfp8_bf16_cutedsl` backend, for example `6,12,24,48,96,192` for DSpark decode steps of 6 rows per request. Every bucket adds compiled kernels and launch graphs. Set the same value on every EP rank. |
+ | `FLASHINFER_MEGAMOE_SPIN_DEBUG` | `0` | `flashinfer/jit/megamoe.py` | Exactly `1` passes `spin_debug=True` to the SM90 NVFP4 fused MegaMoE JIT template; other values leave it false. |
+ | `FLASHINFER_MEGAMOE_INSTRUMENTATION_TAG` | empty | `flashinfer/moe_ep/shims/sm100/cutedsl_megamoe/sources/knob_cache.py` | Separates Blackwell standard/GenPhase knob-cache entries for different profiling setups. Set the same tag when recording and loading instrumented results. This tag does not enable tracing or change compiler options. |
+ | `FLASHINFER_TEST_MEGAMOE_SM120_NIC` | unset | `tests/moe_ep/test_moe_ep_sm120_w4a8_nosync_mega.py` | Exactly `1` runs the SM120 MXFP4 nosync MegaMoE tests of `transport="nic"` (EP 2 / 4 / 8, every routing) and `transport="auto"` (EP8, uneven rows); otherwise they skip. They need NCCL 2.30.7 with GIN on the host's network; set `NCCL_IB_HCA` to NICs the ranks can reach each other through. |
+diff --git a/flashinfer/moe_ep/kernels/flashinfer/sm120_split/VENDOR.md b/flashinfer/moe_ep/kernels/flashinfer/sm120_split/VENDOR.md
+index e8990bdc..aec7df0d 100644
+--- a/flashinfer/moe_ep/kernels/flashinfer/sm120_split/VENDOR.md
++++ b/flashinfer/moe_ep/kernels/flashinfer/sm120_split/VENDOR.md
+@@ -91,10 +91,9 @@ Backends use its package exports rather than raw modules.
+   `heuristic.select_xnuma_pack`: EP16 from 32 tokens per rank; EP8 and
+   smaller worlds keep the span put): the standalone sender puts each cross
+   owner only the rows routed to it plus a token -> row map, and the K1
+-  token-strided pull reads the map for cross sources. FlashInfer does not run
+-  EP16, so the shim never sets `pack` (the K1 hook reads it with `getattr`,
+-  and the non-pack paths compile unchanged); the sender part lives only in the
+-  standalone `transport/xnuma.py` (see FlashInfer adaptations).
++  token-strided pull reads the map for cross sources. The K1 hook reads the
++  flag with `getattr`, and the non-pack paths compile unchanged. FlashInfer
++  runs it since the two-host EP16 support below.
+ - `transport/xnuma_layout.py` accepts forwarder splits 1, 2 or 4 and the
+   forwarder handles any split (default 2, unchanged).
+ - Standalone EP16 measurements (two hosts, p50 us, 29e39e9 -> 7211ca9):
+@@ -102,8 +101,7 @@ Backends use its package exports rather than raw modules.
+   621.6/684.0/850.4/1253.4; GLM5.3-Flash 441.3/544.8/696.3/1151.5 ->
+   427.0/501.2/624.6/1004.5; T16 unchanged.
+ - `tuned_table.json` (1864b29): EP16 anchors retuned on the packed dispatch
+-  (DSv4.1-Flash T128/T256, GLM5.3-Flash T64/T128). FlashInfer does not run
+-  EP16, so the `ep16_2x2numa` entries are inert here; EP4/EP8 entries are
++  (DSv4.1-Flash T128/T256, GLM5.3-Flash T64/T128); EP4/EP8 entries are
+   unchanged.
+
+ ## Changes in the previous drop (29e39e9)
+@@ -154,8 +152,32 @@ Backends use its package exports rather than raw modules.
+ - `src/` and `common/` now match the standalone tree, including the
+   non-finite-aware host comparison and the 16-byte quantized-row check.
+
+-The standalone's two-host EP16 support is present in the topology and tuned
+-table code but is not exposed or tested through FlashInfer.
++## Two-host EP16 through FlashInfer
++
++An EP world on two hosts of 2 x 4 GPUs runs `p2p_split` like EP8 on one host:
++GPUs are identified by (host, PCI bus), only the GPUs of one host and NUMA
++node are P2P peers, and each of the other 12 peers is a cross peer with its
++own shadow segment (13 segments per rank). The `ep16_2x2numa` anchor entries
++apply through the folded `ep_numa_split` view.
++
++Packed dispatch is on where the drop's heuristic selects it
++(`select_xnuma_pack`: EP16 from 32 rows per rank; `MEGAMOE_XNUMA_PACK=0|1`
++overrides it on every rank). The shim decides it per compile bucket at
++workspace allocation: a bucket packs only if its K1 uses the token-strided
++pull, and the shared control region contains the packed staging area as soon
++as one bucket packs. The sender is the standalone's, placed with the
++region's strides and addressed inside the owner's shadow segment: the packed
++activation rows go to the shadow of the activation buffer and
++`map | weights | scales` to the shadow of the scale buffer, which with the
++route-id and weight buffers behind it holds them for every bucket up to the
++workspace capacity.
++
++Tests: host-only topology, anchor, pack selection and layout checks in
++`tests/moe_ep/test_sm120_w4a8_cutedsl_nccl_host.py`; the 16-rank GPU test of
++`tests/moe_ep/test_moe_ep_sm120_w4a8_cutedsl_mega.py` needs two hosts
++(`torchrun --nnodes=2 --nproc_per_node=8` on both). With
++`MEGAMOE_XNUMA_PACK=1` the 8-rank test exercises the packed sender on one
++host.
+
+ Not vendored: the standalone benchmark runners, the whole-invocation graph
+ helper used only by them, the ring/owner-plan GIN transports and the epoch
+@@ -178,9 +200,11 @@ These are preserved when applying upstream kernel changes:
+   view to the heuristic so that the `ep8_2numa` anchor entries apply.
+ - `transport/xnuma.py` accepts a shared control-region layout, a shared
+   device epoch and per-input put regions, so one workspace serves every
+-  compile bucket from one reserved region. It keeps those span puts: the
+-  standalone packed EP16 dispatch (`XnumaLayout.pack`) is not ported, and
+-  `XnumaK1Config` has no `pack` field (the K1 hook treats it as off). `transport/nccl/device.bind`
++  compile bucket from one reserved region. A bucket without packed dispatch
++  keeps those span puts; a packed bucket (`XnumaLayout.pack`) stages its
++  routed rows with the region's strides and puts them at the activation and
++  scale buffers' offsets inside the owner's shadow segment (the standalone
++  addresses one contiguous input span). `transport/nccl/device.bind`
+   accepts the owning session instead of the process-global session.
+ - `transport/nccl/runtime.py` tries roots registered in `PREFERRED_ROOTS`
+   first (the adapter registers FlashInfer's NCCL discovery: `NCCL_HOME`, then
+diff --git a/flashinfer/moe_ep/kernels/flashinfer/sm120_split/moe_sm120_mxfp4mxfp8_split/transport/xnuma.py b/flashinfer/moe_ep/kernels/flashinfer/sm120_split/moe_sm120_mxfp4mxfp8_split/transport/xnuma.py
+index ddd7e6ea..f8b9d9dc 100644
+--- a/flashinfer/moe_ep/kernels/flashinfer/sm120_split/moe_sm120_mxfp4mxfp8_split/transport/xnuma.py
++++ b/flashinfer/moe_ep/kernels/flashinfer/sm120_split/moe_sm120_mxfp4mxfp8_split/transport/xnuma.py
+@@ -47,7 +47,7 @@ import torch
+ from cuda.bindings import driver as cuda
+ from cutlass.cutlass_dsl import Int32, Int64
+
+-from .xnuma_layout import XnumaLayout
++from .xnuma_layout import SENDER_THREADS, XnumaLayout
+
+
+ @dataclass(frozen=True)
+@@ -63,6 +63,12 @@ class XnumaK1Config:
+     tokens_per_rank: int
+     k2tot_addr: int
+     k2meta_addr: int
++    # Packed dispatch (``XnumaLayout.pack``): the shadow of a cross source holds
++    # only the rows it routed here: activation row p at the shadow activation
++    # base, and map[T] i32 | weights[T][topk] | scales[T][sf_row] (rows by
++    # packed index p) at the shadow scale base; map[token] = p.
++    pack: bool = False
++    cross_mask: int = 0
+
+
+ _TABLE_FIELDS = 8  # per cross peer j: peer, send_span_dst, inbox_dst, dsig_dst, shadow_comb, ret_dst, done_dst, -
+@@ -81,7 +87,8 @@ class XnumaTransport:
+           are signal-adds keyed by source word, so transports sharing a region
+           must also share the epoch.
+         * ``input_regions``: input tensors sent as separate puts (default: one
+-          span from the first to the last input buffer).
++          span from the first to the last input buffer). Ignored by a packed
++          layout (``layout.pack``), which sends only the routed rows.
+         * ``zero_reserved``: clear the control region (only before first use).
+         """
+         self.tester = tester
+@@ -91,7 +98,7 @@ class XnumaTransport:
+         if (region.world, region.n_cross, region.experts_per_rank, region.topk, region.hidden,
+                 region.fsplit) != (layout.world, layout.n_cross, layout.experts_per_rank,
+                                    layout.topk, layout.hidden, layout.fsplit) or (
+-                region.tokens_per_rank < layout.tokens_per_rank):
++                region.tokens_per_rank < layout.tokens_per_rank) or (layout.pack and not region.pack):
+             raise ValueError("xnuma region layout does not cover the call layout")
+         self.region = region
+         shadow = session.shadow
+@@ -143,6 +150,21 @@ class XnumaTransport:
+         # (source address, offset inside segment 0, bytes).
+         self.input_regions = tuple((lo, lo - arena, n) for lo, n in regions if n > 0)
+         self.combine_addr = co_lo
++        self.act_addr = int(tester.my_activation.data_ptr())
++        self.sf_addr = int(tester.my_activation_sf.data_ptr())
++        self.w_addr = int(tester.my_topk_weights.data_ptr())
++        if layout.pack:
++            # The owner's shadow-of-me receives the packed rows at the
++            # activation buffer and map | weights | scales from the scale
++            # buffer on, so that part of the input span must hold them.
++            sf = tester.my_activation_sf
++            sf_off = self.sf_addr - span_lo
++            if not (self.act_addr == span_lo
++                    and sf.shape[-1] * sf.element_size() == layout.sf_row_bytes
++                    and (layout.hidden // 8) % SENDER_THREADS == 0
++                    and sf_off % 16 == 0 and sf_off >= layout.tokens_per_rank * layout.hidden
++                    and sf_off + layout.pack_small_bytes <= self.span_bytes):
++                raise RuntimeError("xnuma pack: unsupported input span layout")
+
+         stride = region.max_routes * region.slot_bytes
+         rows = []
+@@ -170,6 +192,7 @@ class XnumaTransport:
+             epoch_addr=int(self.epoch.data_ptr()), dsig_addr=self.addr["dsig"], inbox_addr=self.addr["inbox"],
+             record_bytes=self.region.record_bytes, cross_sources=tuple(self.cross), experts_per_rank=L.experts_per_rank,
+             tokens_per_rank=L.tokens_per_rank, k2tot_addr=self.addr["k2tot"], k2meta_addr=self.addr["k2meta"],
++            pack=L.pack, cross_mask=sum(1 << p for p in self.cross),
+         )
+
+     @property
+@@ -215,6 +238,23 @@ class XnumaTransport:
+         UNROLL = ROW8 // 128 if ROW8 % 128 == 0 else 0
+         half_masks = [sum(1 << e for e in range(E) if e % FS != h) for h in range(FS)]
+         cross_mask = sum(1 << p for p in self.cross)
++        # Packed dispatch constants (layout.pack). Staging and scan scratch are
++        # placed with the region's strides; the content follows the call shape.
++        PACK = L.pack
++        CT = (T + 127) // 128  # 128-token scan rounds
++        HB = L.hidden
++        H8 = HB // 8
++        WPT = H8 // 128
++        RB = 8  # activation rows in flight per pass
++        SFB = L.sf_row_bytes
++        SF4 = SFB // 4
++        SMALL_FIX = T * 4 + T * TOPK * 4
++        ACT_REG = L.pack_act_bytes
++        PSTRIDE = G.pack_stride
++        PSCR_STRIDE = (SENDER_THREADS + G.tokens_per_rank) * 4
++        ACT_SRC, SF_SRC, W_SRC = self.act_addr, self.sf_addr, self.w_addr
++        arena = self.session.p2p.base
++        ACT_OFF, SF_OFF = self.act_addr - arena, self.sf_addr - arena  # inside segment 0
+
+         class _Obj:
+             pass
+@@ -249,6 +289,97 @@ class XnumaTransport:
+                     d[x] = s[x]
+                     x = x + Int32(128)
+
++        @cute.jit
++        def routed(t, owner):
++            tk = cute.make_tensor(ptr(Int64, Int64(TOPK_ADDR), 8), cute.make_layout(T * TOPK))
++            hit = Int32(0)
++            for k in cutlass.range_constexpr(TOPK):
++                ex = tk[t * Int32(TOPK) + Int32(k)]
++                if ex >= Int64(0):
++                    if Int32(ex // Int64(E)) == owner:
++                        hit = Int32(1)
++            return hit
++
++        @cute.jit
++        def pack_send(j, tid, owner):
++            """Stage the rows routed to ``owner`` (ascending token order) and put
++            them: activation rows to the owner's shadow-of-me activation buffer,
++            map | weights | scales to its scale buffer."""
++            pst = Int64(A["pstage"]) + Int64(j) * Int64(PSTRIDE)
++            small = pst + Int64(ACT_REG)
++            pscr = cute.make_tensor(ptr(Int32, Int64(A["pscr"]) + Int64(j) * Int64(PSCR_STRIDE), 4),
++                                    cute.make_layout(128 + T))
++            mp = cute.make_tensor(ptr(Int32, small, 4), cute.make_layout(T))
++            # Ballot scan over rounds of 128 tokens (token r*128 + tid), so the
++            # packed order is the token order.
++            lane = tid % Int32(32)
++            warp = tid // Int32(32)
++            below_mask = (Int32(1) << lane) - Int32(1)
++            n = Int32(0)
++            r = Int32(0)
++            while r < Int32(CT):
++                t = r * Int32(128) + tid
++                hit = Int32(0)
++                if t < Int32(T):
++                    hit = routed(t, owner)
++                mask = Int32(cute.arch.vote_ballot_sync(hit == Int32(1)))
++                if lane == Int32(0):
++                    pscr[warp] = Int32(cute.arch.popc(mask))
++                cute.arch.barrier(barrier_id=0, number_of_threads=128)
++                woff = Int32(0)
++                tot = Int32(0)
++                for w in cutlass.range_constexpr(4):
++                    cw = pscr[Int32(w)]
++                    if Int32(w) < warp:
++                        woff = woff + cw
++                    tot = tot + cw
++                if hit == Int32(1):
++                    q = n + woff + Int32(cute.arch.popc(mask & below_mask))
++                    mp[t] = q
++                    pscr[Int32(128) + q] = t
++                n = n + tot
++                cute.arch.barrier(barrier_id=0, number_of_threads=128)
++                r = r + Int32(1)
++            src = cute.make_tensor(ptr(Int64, Int64(ACT_SRC), 16), cute.make_layout(T * H8))
++            dst = cute.make_tensor(ptr(Int64, pst, 16), cute.make_layout(T * H8))
++            p0 = Int32(0)
++            while p0 < n:
++                rows = []
++                for r in cutlass.range_constexpr(RB):
++                    pr = p0 + Int32(r)
++                    if pr >= n:
++                        pr = n - Int32(1)
++                    rows.append(pr)
++                vals = []
++                for r in cutlass.range_constexpr(RB):
++                    ts = pscr[Int32(128) + rows[r]]
++                    for k in cutlass.range_constexpr(WPT):
++                        vals.append(src[ts * Int32(H8) + tid + Int32(128 * k)])
++                for r in cutlass.range_constexpr(RB):
++                    for k in cutlass.range_constexpr(WPT):
++                        dst[rows[r] * Int32(H8) + tid + Int32(128 * k)] = vals[r * WPT + k]
++                p0 = p0 + Int32(RB)
++            sfs = cute.make_tensor(ptr(Int32, Int64(SF_SRC), 4), cute.make_layout(T * SF4))
++            sfd = cute.make_tensor(ptr(Int32, small + Int64(SMALL_FIX), 4), cute.make_layout(T * SF4))
++            x = tid
++            while x < n * Int32(SF4):
++                pr = x // Int32(SF4)
++                sfd[x] = sfs[pscr[Int32(128) + pr] * Int32(SF4) + (x - pr * Int32(SF4))]
++                x = x + Int32(128)
++            ws = cute.make_tensor(ptr(Int32, Int64(W_SRC), 4), cute.make_layout(T * TOPK))
++            wd = cute.make_tensor(ptr(Int32, small + Int64(T * 4), 4), cute.make_layout(T * TOPK))
++            x = tid
++            while x < n * Int32(TOPK):
++                pr = x // Int32(TOPK)
++                wd[x] = ws[pscr[Int32(128) + pr] * Int32(TOPK) + (x - pr * Int32(TOPK))]
++                x = x + Int32(128)
++            cute.arch.fence_acq_rel_sys()
++            cute.arch.barrier(barrier_id=0, number_of_threads=128)
++            if n > Int32(0):
++                gin.put_nbi_block(tx, u8(tbl(j, 1) + Int64(ACT_OFF), n * Int32(HB)), u8(pst, n * Int32(HB)), owner)
++            gin.put_nbi_block(tx, u8(tbl(j, 1) + Int64(SF_OFF), Int32(SMALL_FIX) + n * Int32(SFB)),
++                              u8(small, Int32(SMALL_FIX) + n * Int32(SFB)), owner)
++
+         @cute.kernel
+         def bump_kernel():
+             tid, _, _ = cute.arch.thread_idx()
+@@ -283,10 +414,13 @@ class XnumaTransport:
+             else:
+                 if epoch % Int64(QUIET_EVERY) == Int64(0):
+                     gin.quiet(tx)
+-            # Data first; the record build overlaps the transfer.
+-            for r in cutlass.range_constexpr(len(REGIONS)):
+-                gin.put_nbi_block(tx, u8(tbl(j, 1) + Int64(REGIONS[r][1]), REGIONS[r][2]),
+-                                  u8(Int64(REGIONS[r][0]), REGIONS[r][2]), owner)
++            if cutlass.const_expr(PACK):
++                pack_send(j, tid, owner)
++            else:
++                # Data first; the record build overlaps the transfer.
++                for r in cutlass.range_constexpr(len(REGIONS)):
++                    gin.put_nbi_block(tx, u8(tbl(j, 1) + Int64(REGIONS[r][1]), REGIONS[r][2]),
++                                      u8(Int64(REGIONS[r][0]), REGIONS[r][2]), owner)
+             rec_addr = Int64(A["txrec"]) + Int64(j) * Int64(REC_B)
+             rec = cute.make_tensor(ptr(Int32, rec_addr, 4), cute.make_layout(REC_I32))
+             topk = cute.make_tensor(ptr(Int64, Int64(TOPK_ADDR), 8), cute.make_layout(T * TOPK))
+diff --git a/flashinfer/moe_ep/shims/sm120/split_cutedsl/__init__.py b/flashinfer/moe_ep/shims/sm120/split_cutedsl/__init__.py
+index 456fbca3..74ecd49c 100644
+--- a/flashinfer/moe_ep/shims/sm120/split_cutedsl/__init__.py
++++ b/flashinfer/moe_ep/shims/sm120/split_cutedsl/__init__.py
+@@ -14,6 +14,7 @@ from flashinfer.moe_ep.shims.sm120.split_cutedsl.runtime import (
+     run_split_mega_moe,
+     select_comm_backend,
+     select_graph_compile_bucket,
++    select_xnuma_pack,
+     set_compile_tokens_per_rank,
+     workspace_compile_buckets,
+ )
+@@ -44,6 +45,7 @@ __all__ = [
+     "run_split_mega_moe",
+     "select_comm_backend",
+     "select_graph_compile_bucket",
++    "select_xnuma_pack",
+     "set_compile_tokens_per_rank",
+     "stage_inputs",
+     "transform_prequantized_weights",
+diff --git a/flashinfer/moe_ep/shims/sm120/split_cutedsl/runtime.py b/flashinfer/moe_ep/shims/sm120/split_cutedsl/runtime.py
+index da101c14..7ca11db1 100644
+--- a/flashinfer/moe_ep/shims/sm120/split_cutedsl/runtime.py
++++ b/flashinfer/moe_ep/shims/sm120/split_cutedsl/runtime.py
+@@ -46,6 +46,25 @@ DECODE_GRAPH_COMPILE_BUCKETS = (
+     2048,
+     4096,
+ )
++
++
++def _extra_compile_buckets() -> tuple[int, ...]:
++    """More compile buckets from ``MEGAMOE_EXTRA_COMPILE_BUCKETS`` (comma-separated rows per rank).
++
++    A deployment whose decode calls come in fixed row counts (6 rows per stream under DSpark: 6, 12, 24,
++    48, 96, 192) can add them, so that such a call runs kernels compiled, and tuned, for exactly its rows
++    instead of the next larger default bucket. Every bucket costs one more set of compiled kernels and
++    launch graphs. The value must be the same on every EP rank.
++    """
++
++    raw = os.environ.get("MEGAMOE_EXTRA_COMPILE_BUCKETS", "").replace(" ", "")
++    values = tuple(int(v) for v in raw.split(",") if v)
++    if any(v <= 0 for v in values):
++        raise ValueError(f"MEGAMOE_EXTRA_COMPILE_BUCKETS must list positive row counts, got {raw!r}")
++    return values
++
++
++DECODE_GRAPH_COMPILE_BUCKETS = tuple(sorted({*DECODE_GRAPH_COMPILE_BUCKETS, *_extra_compile_buckets()}))
+ _WARNED_DECODE_CAPACITY_FALLBACKS: set[int] = set()
+
+ COMM_BACKENDS = ("p2p_direct", "p2p_split")
+@@ -101,8 +120,9 @@ def select_comm_backend(config: "MegaMoESm120W4A8Config", topology: Any) -> str:
+     """Transport for an EP world: ``p2p_direct`` or ``p2p_split``.
+
+     Same-NUMA worlds use direct P2P (NCCL LSA). A world spanning NUMA nodes
+-    has no P2P mapping between them, so it uses ``p2p_split``: same-NUMA peers
+-    stay direct and every cross-NUMA peer is served through a local shadow
++    or hosts (EP8 on 2 x 4 GPUs, EP16 on two such hosts) has no P2P mapping
++    between them, so it uses ``p2p_split``: peers on the same host and NUMA
++    node stay direct and every other peer is served through a local shadow
+     segment synchronized over NCCL GIN. The optional ``comm_backend`` knob may
+     only confirm the backend that the discovered topology admits.
+
+@@ -145,6 +165,29 @@ def select_comm_backend(config: "MegaMoESm120W4A8Config", topology: Any) -> str:
+     return "p2p_split"
+
+
++def select_xnuma_pack(tokens_per_rank: int, world_size: int) -> bool:
++    """Packed ``p2p_split`` dispatch for one compile bucket.
++
++    A packed sender puts each cross owner only the rows routed to it plus a
++    token -> row map instead of its whole input span. The drop's heuristic
++    turns it on for EP16 (two hosts, 12 network peers per rank) from 32
++    tokens per rank; ``MEGAMOE_XNUMA_PACK=0|1`` overrides it (diagnostics).
++    The value must be the same on every EP rank.
++    """
++
++    override = os.environ.get("MEGAMOE_XNUMA_PACK", "")
++    if override in ("0", "1"):
++        return override == "1"
++    from moe_sm120_mxfp4mxfp8_split.heuristic import select_xnuma_pack as select
++
++    # MEGAMOE_XNUMA_PACK_MIN_TOKENS moves the row threshold of the EP sizes the heuristic packs at all
++    # (with a 24-row bucket added, 24 rows no longer run in the packed 32-row bucket).
++    threshold = os.environ.get("MEGAMOE_XNUMA_PACK_MIN_TOKENS", "")
++    if threshold and select(1 << 30, world_size):
++        return int(tokens_per_rank) >= int(threshold)
++    return select(tokens_per_rank, world_size)
++
++
+ def select_graph_compile_bucket(
+     requested_tokens_per_rank: int | None,
+     workspace_capacity: int,
+@@ -299,6 +342,8 @@ class MegaMoESm120W4A8Workspace:
+     # bucket's cross-NUMA transport.
+     _xnuma_region: Any = None
+     _xnuma_epoch: Any = None
++    # p2p_split buckets whose sender packs the routed rows (EP16).
++    _xnuma_pack_buckets: frozenset = frozenset()
+     _capture_streams: Any = None
+     _storages: dict[int, _ExecutionStorage] = field(default_factory=dict)
+     _execution_plans: dict[int, tuple[Any, Any]] = field(default_factory=dict)
+@@ -670,7 +715,17 @@ class MegaMoESm120W4A8Frontend:
+             tokens_per_rank=bucket,
+             topk=cfg.num_topk,
+             hidden=cfg.hidden,
++            pack=bucket in workspace._xnuma_pack_buckets,
+         )
++        if layout.pack and bundle.k1.token_comm.dispatch_pull_mode != "token_strided":
++            raise RuntimeError("xnuma pack needs the token-strided pull")
++        if os.environ.get("FLASHINFER_MEGAMOE_LOG_COMPILE_SPEC") == "1":
++            print(
++                "[FlashInfer MegaMoE xnuma] "
++                f"rank={cfg.rank} bucket={bucket} n_cross={layout.n_cross} "
++                f"fsplit={layout.fsplit} pack={layout.pack}",
++                flush=True,
++            )
+         inputs = (
+             workspace.x[:bucket],
+             workspace.x_scale[:bucket],
+@@ -1254,8 +1309,17 @@ def allocate_workspace(
+             from moe_sm120_mxfp4mxfp8_split.transport.xnuma_layout import XnumaLayout
+
+             shadow = ShadowLayout.from_topology(topology, config.rank)
++            # Packed dispatch needs the token-strided K1 pull; buckets that
++            # select another pull mode keep the span puts.
++            workspace._xnuma_pack_buckets = frozenset(
++                bucket
++                for bucket, (_, bundle) in plans.items()
++                if select_xnuma_pack(bucket, config.world_size)
++                and bundle.k1.token_comm.dispatch_pull_mode == "token_strided"
++            )
+             # One control-region placement for every bucket: commit words are
+-            # cumulative signal-adds keyed by address.
++            # cumulative signal-adds keyed by address. The packed staging
++            # area is part of it as soon as one bucket packs.
+             workspace._xnuma_region = XnumaLayout(
+                 world=config.world_size,
+                 n_cross=shadow.num_cross,
+@@ -1263,6 +1327,7 @@ def allocate_workspace(
+                 tokens_per_rank=max(buckets),
+                 topk=config.num_topk,
+                 hidden=config.hidden,
++                pack=bool(workspace._xnuma_pack_buckets),
+             )
+             reserved_bytes = workspace._xnuma_region.reserved_bytes
+             workspace._xnuma_epoch = torch.zeros((1,), dtype=torch.int64, device="cuda")
+@@ -1373,6 +1438,7 @@ __all__ = [
+     "run_split_mega_moe",
+     "select_comm_backend",
+     "select_graph_compile_bucket",
++    "select_xnuma_pack",
+     "set_compile_tokens_per_rank",
+     "workspace_compile_buckets",
+ ]
+diff --git a/tests/moe_ep/test_moe_ep_sm120_w4a8_cutedsl_mega.py b/tests/moe_ep/test_moe_ep_sm120_w4a8_cutedsl_mega.py
+index aaef87f2..7decaa90 100644
+--- a/tests/moe_ep/test_moe_ep_sm120_w4a8_cutedsl_mega.py
++++ b/tests/moe_ep/test_moe_ep_sm120_w4a8_cutedsl_mega.py
+@@ -737,25 +737,58 @@ def test_sm120_w4a8_eight_rank_p2p_split_and_cuda_graph_replay(
+ ) -> None:
+     """EP8 on two NUMA nodes runs p2p_split (same-NUMA P2P + NCCL GIN)."""
+
++    _check_p2p_split_world(8, tokens_by_rank, skewed_routing)
++
++
++@pytest.mark.usefixtures("require_sm120_w4a8_green_context")
++@pytest.mark.gpu_8
++@pytest.mark.arch_sm120
++@pytest.mark.parametrize(
++    "tokens_by_rank,skewed_routing",
++    (
++        ((16,) * 16, True),
++        ((67, 64, 19, 1, 0, 7, 33, 64, 5, 48, 64, 2, 31, 0, 16, 60), False),
++        ((383, 192, 7, 0, 255, 1, 64, 300, 384, 0, 3, 128, 77, 250, 1, 96), True),
++    ),
++    ids=("decode-skewed", "decode-uneven-packed", "bucket384-skewed-packed"),
++)
++def test_sm120_w4a8_sixteen_rank_two_host_p2p_split_and_cuda_graph_replay(
++    tokens_by_rank: tuple[int, ...],
++    skewed_routing: bool,
++) -> None:
++    """EP16 on two hosts of 2 x 4 GPUs runs p2p_split: only the GPUs of one
++    host and NUMA node are P2P peers, the other 12 are reached over NCCL GIN,
++    with packed dispatch from 32 rows per rank. Launch with
++    ``torchrun --nnodes=2 --nproc_per_node=8`` on both hosts."""
++
++    _check_p2p_split_world(16, tokens_by_rank, skewed_routing)
++
++
++def _check_p2p_split_world(
++    expected_world_size: int,
++    tokens_by_rank: tuple[int, ...],
++    skewed_routing: bool,
++) -> None:
+     import torch.distributed as dist
+
+     world_size = int(os.environ.get("WORLD_SIZE", "1"))
+-    if world_size != 8:
+-        pytest.skip("requires exactly eight ranks")
++    if world_size != expected_world_size:
++        pytest.skip(f"requires exactly {expected_world_size} ranks")
+     rank = int(os.environ["RANK"])
+     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+     # Skewed routing sends every route to experts 0-7, owned by ranks 0-3
+     # (one NUMA node); the other node's owners receive zero-count records.
++    experts = 2 * world_size
+     problem = _problem(
+         rank,
+         world_size,
+         tokens=tokens_by_rank[rank],
+         capacity=4096,
+         skewed_routing=skewed_routing,
+-        experts=16,
++        experts=experts,
+     )
+     small = _problem(
+-        rank, world_size, tokens=7, capacity=4096, experts=16, seed_offset=23
++        rank, world_size, tokens=7, capacity=4096, experts=experts, seed_offset=23
+     )["inputs"]
+     layer = _make_layer(rank, world_size, problem)
+     bucket = max(tokens_by_rank)
+@@ -775,7 +808,11 @@ def test_sm120_w4a8_eight_rank_p2p_split_and_cuda_graph_replay(
+         )
+         assert workspace._comm_backend == expected_backend
+         if expected_backend == "p2p_split":
+-            assert workspace._executions[compiled_bucket].xnuma is not None
++            xnuma = workspace._executions[compiled_bucket].xnuma
++            assert xnuma is not None
++            from flashinfer.moe_ep.shims.sm120.split_cutedsl import select_xnuma_pack
++
++            assert xnuma.layout.pack == select_xnuma_pack(compiled_bucket, world_size)
+         torch.testing.assert_close(eager0, eager1, atol=0.0, rtol=0.0)
+
+         global_problem = _global_weight_problem(problem)
+diff --git a/tests/moe_ep/test_sm120_w4a8_cutedsl_nccl_host.py b/tests/moe_ep/test_sm120_w4a8_cutedsl_nccl_host.py
+index 8b307d1d..d35abac1 100644
+--- a/tests/moe_ep/test_sm120_w4a8_cutedsl_nccl_host.py
++++ b/tests/moe_ep/test_sm120_w4a8_cutedsl_nccl_host.py
+@@ -1,4 +1,4 @@
+-"""Host-only contracts of the SM120 W4A8 NCCL transport and EP8 p2p_split."""
++"""Host-only contracts of the SM120 W4A8 NCCL transport and p2p_split (EP8, EP16)."""
+
+ from __future__ import annotations
+
+@@ -12,6 +12,7 @@ from flashinfer.moe_ep.shims.sm120.split_cutedsl import (
+     MegaMoESm120W4A8Config,
+     bootstrap_paths,
+     select_comm_backend,
++    select_xnuma_pack,
+     workspace_compile_buckets,
+ )
+
+@@ -130,6 +131,120 @@ def test_two_numa_ep8_topology_and_shadow_segments(rank: int) -> None:
+         )
+
+
++# EP16 on two hosts of 2 x 4 GPUs: (host, NUMA node) of every EP rank. PCI bus
++# ids and NUMA node numbers repeat on the second host.
++TWO_HOSTS = tuple(
++    (f"host{host}", node) for host in range(2) for node in (0, 0, 0, 0, 1, 1, 1, 1)
++)
++
++
++def _two_host_topology(rank: int):
++    peers = [
++        GpuTopologyEntry(
++            global_rank=index,
++            local_rank=index % 8,
++            pci_bus_id=f"0000:{index % 8 + 1:02x}:00.0",
++            numa_node=node,
++            host=host,
++        )
++        for index, (host, node) in enumerate(TWO_HOSTS)
++    ]
++    return derive_ep_transport_topology(peers, ep_rank=rank)
++
++
++@pytest.mark.parametrize("rank", (0, 3, 4, 8, 15))
++def test_two_host_ep16_topology_and_shadow_segments(rank: int) -> None:
++    topology = _two_host_topology(rank)
++    # Only the GPUs of the same host and NUMA node are P2P peers.
++    assert (topology.same_numa_peer_count, topology.cross_numa_peer_count) == (3, 12)
++    cross = [peer for peer in range(16) if TWO_HOSTS[peer] != TWO_HOSTS[rank]]
++    assert topology.force_ibgda_peer_mask == sum(1 << peer for peer in cross)
++    shadow = ShadowLayout.from_topology(topology, rank)
++    assert shadow.num_segments == 13
++    assert shadow.cross_mask == topology.force_ibgda_peer_mask
++    for peer, segment in shadow.local_segments().items():
++        assert ShadowLayout.from_topology(topology, peer).remote_segments()[rank] == (
++            segment
++        )
++
++
++def test_two_host_ep16_runs_p2p_split() -> None:
++    topology = _two_host_topology(5)
++    config = _config(DSV41, rank=5, world_size=16)
++    assert select_comm_backend(config, topology) == "p2p_split"
++    with pytest.raises(ValueError, match="p2p_split"):
++        select_comm_backend(
++            dataclasses.replace(config, knobs={"comm_backend": "p2p_direct"}), topology
++        )
++
++
++@pytest.mark.parametrize("model", (DSV41, GLM53), ids=("dsv41", "glm53"))
++@pytest.mark.parametrize("tokens", (16, 64))
++def test_p2p_split_compile_spec_applies_ep16_anchor(model, tokens: int) -> None:
++    spec = _spec(model, tokens, ep=16, same=15, cross=0, split=True)
++    entry = tuned_table.lookup(
++        _shape(model, tokens, ep=16, same=15, cross=0, split=True)
++    )
++    assert entry["tokens"] == tokens
++    for field, value in _expected_table_fields(entry).items():
++        assert getattr(spec.kernel, field) == value, field
++    assert spec.kernel.comm_backend == "p2p_direct"
++    assert not spec.kernel.rank_local_combine
++    assert spec.kernel.k2_warps == 8
++
++
++def test_packed_dispatch_follows_ep_size_and_bucket(monkeypatch) -> None:
++    monkeypatch.delenv("MEGAMOE_XNUMA_PACK", raising=False)
++    buckets = workspace_compile_buckets(512)
++    # Two hosts: 12 network peers per rank, packed from 32 rows per rank.
++    assert [b for b in buckets if select_xnuma_pack(b, 16)] == [
++        32,
++        64,
++        128,
++        168,
++        256,
++        320,
++        384,
++        512,
++    ]
++    assert not any(select_xnuma_pack(b, 8) for b in buckets)
++    monkeypatch.setenv("MEGAMOE_XNUMA_PACK", "1")
++    assert select_xnuma_pack(7, 8)
++    monkeypatch.setenv("MEGAMOE_XNUMA_PACK", "0")
++    assert not select_xnuma_pack(256, 16)
++
++
++def test_packed_xnuma_region_covers_every_bucket() -> None:
++    hidden, _intermediate, topk, experts = DSV41
++    buckets = workspace_compile_buckets(512)
++    region = XnumaLayout(
++        world=16,
++        n_cross=12,
++        experts_per_rank=experts // 16,
++        tokens_per_rank=max(buckets),
++        topk=topk,
++        hidden=hidden,
++        pack=True,
++    )
++    plain = dataclasses.replace(region, pack=False)
++    # The packed staging area is appended; the return rows keep their size.
++    assert region.reserved_bytes > plain.reserved_bytes
++    offsets = region.offsets
++    assert offsets["stage"] - offsets["ret"] == (
++        12 * 2 * 512 * topk * (16 + 2 * hidden)
++    )
++    assert offsets["end"] - offsets["pstage"] == 12 * region.pack_stride
++    for bucket in buckets:
++        layout = dataclasses.replace(region, tokens_per_rank=bucket)
++        assert layout.reserved_bytes <= region.reserved_bytes
++        assert layout.pack_stride <= region.pack_stride
++        # map | weights | scales of the packed rows fit behind the activation
++        # rows of a staged input span of this bucket.
++        assert layout.pack_small_bytes <= bucket * (
++            layout.sf_row_bytes + topk * 8 + topk * 4
++        )
++
++
+ def test_single_numa_ep4_topology_has_no_network_peers() -> None:
+     topology = _topology((1, 1, 1, 1), 2)
+     assert (topology.same_numa_peer_count, topology.cross_numa_peer_count) == (3, 0)

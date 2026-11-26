@@ -1,0 +1,125 @@
+[tune2] 2026-11-26 14:07:45 anchors=128,256,64,32,16 sms=156 peer=<node1> work=<work>/w4a8-20261126/tune2/dsv41_ep16
+[tune2] T=128 balanced ok p50=1017.2 {"backend": "p2p_split"}
+[tune2] T=128 default today 1017.2 against 1020.7 (-0.34%): old balanced trials ignored
+[tune2] T=128 power_law ok p50=1682.0 {"backend": "p2p_split"}
+[tune2] T=128 balanced ok p50=1243.6 {"backend": "p2p_split", "dispatch_chunk_tokens": 32, "fc1_utility_postprocess": "on", "k1_ctas_per_sm": 2, "k1_n": 16, "k1_stages": 2, "k2_launch_factor": 2, "k2_n": 32, "k2_ready_queue_bundle": 2, "k2_tail_reclaim": "on", "k2_warps": 8, "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 4}
+[tune2] T=128 balanced ok p50=951.8 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k2_tail_reclaim": "on", "sms": [112, 0, 0, 44], "weight_eviction_policy": "evict_first"}
+[tune2] T=128 power_law ok p50=1393.9 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k2_tail_reclaim": "on", "sms": [112, 0, 0, 44], "weight_eviction_policy": "evict_first"}
+[tune2] T=128 balanced ok p50=1377.7 {"backend": "p2p_split", "dispatch_chunk_tokens": 32, "fc1_utility_postprocess": "on", "k1_ctas_per_sm": 2, "k1_n": 16, "k2_launch_factor": 2, "k2_n": 16, "k2_ready_queue_bundle": 2, "k2_tail_reclaim": "on", "k2_warps": 8, "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced ok p50=1286.5 {"backend": "p2p_split", "dispatch_chunk_tokens": 32, "fc1_utility_postprocess": "on", "k1_ctas_per_sm": 2, "k1_n": 16, "k1_stages": 3, "k2_launch_factor": 2, "k2_n": 32, "k2_ready_queue_bundle": 2, "k2_tail_reclaim": "on", "k2_warps": 8, "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced ok p50=1325.7 {"backend": "p2p_split", "dispatch_chunk_tokens": 32, "fc1_utility_postprocess": "on", "k1_ctas_per_sm": 1, "k1_n": 16, "k1_stages": 3, "k2_launch_factor": 2, "k2_n": 16, "k2_ready_queue_bundle": 2, "k2_tail_reclaim": "on", "k2_warps": 8, "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 4}
+[tune2] T=128 balanced ok p50=1100.7 {"backend": "p2p_split", "dispatch_chunk_tokens": 32, "fc1_utility_postprocess": "on", "k1_ctas_per_sm": 2, "k1_n": 32, "k1_stages": 2, "k2_launch_factor": 2, "k2_n": 16, "k2_ready_queue_bundle": 2, "k2_tail_reclaim": "on", "k2_warps": 8, "sms": [88, 0, 0, 68], "weight_eviction_policy": "default", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced ok p50=901.2 {"backend": "p2p_split", "k1_stages": 3, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [112, 0, 0, 44], "weight_eviction_policy": "evict_first"}
+[tune2] T=128 power_law ok p50=1419.6 {"backend": "p2p_split", "k1_stages": 3, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [112, 0, 0, 44], "weight_eviction_policy": "evict_first"}
+[tune2] T=128 balanced ok p50=888.5 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [112, 0, 0, 44], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 4}
+[tune2] T=128 power_law ok p50=1352.2 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [112, 0, 0, 44], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 4}
+[tune2] T=128 balanced ok p50=938.6 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first"}
+[tune2] T=128 power_law ok p50=1406.5 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first"}
+[tune2] T=128 balanced ok p50=863.4 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 power_law ok p50=1352.8 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced ok p50=886.8 {"backend": "p2p_split", "k1_stages": 3, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first"}
+[tune2] T=128 power_law ok p50=1414.7 {"backend": "p2p_split", "k1_stages": 3, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first"}
+[tune2] T=128 start shipped128 {'balanced': -15.12, 'power_law': -19.57} of 10 admissible starts
+[tune2] T=128 balanced ok p50=1070.6 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_n": 16, "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced ok p50=927.1 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_n": 32, "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced ok p50=1034.8 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 16, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced ok p50=863.5 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "k2_warps": 8, "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 power_law ok p50=1346.9 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "k2_warps": 8, "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced rc=1 p50=inf {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "k2_warps": 12, "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced ok p50=863.6 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_ctas_per_sm": 1, "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 power_law ok p50=1344.9 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_ctas_per_sm": 1, "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced rc=1 p50=inf {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_ctas_per_sm": 2, "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced ok p50=863.6 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_launch_factor": 1, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 power_law ok p50=1350.2 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_launch_factor": 1, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced ok p50=890.4 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_launch_factor": 2, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced ok p50=870.7 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "push_dispatch": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced ok p50=876.0 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 4}
+[tune2] T=128 balanced ok p50=878.1 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 8}
+[tune2] T=128 balanced ok p50=917.5 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced ok p50=929.1 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 2, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced ok p50=884.2 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced ok p50=894.5 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [104, 0, 0, 52], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced ok p50=937.8 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [88, 0, 0, 68], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced ok p50=877.9 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [112, 0, 0, 44], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced ok p50=916.5 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [96, 0, 0, 60], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced ok p50=1111.9 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "off", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced ok p50=883.4 {"backend": "p2p_split", "fc1_utility_postprocess": "off", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced ok p50=894.8 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "default", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced ok p50=871.7 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 power_law ok p50=1377.5 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=128 balanced ok p50=1026.8 {"backend": "p2p_split"}
+[tune2] T=128 power_law ok p50=1381.9 {"backend": "p2p_split"}
+[tune2] anchor T=128 done: {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k2_n": 32, "k2_tail_reclaim": "on", "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0, "sms": [120, 0, 0, 36], "k1_t0_prefetch": 64} against default {'balanced': -15.12, 'power_law': -19.57} mean -17.35% against shipped {'balanced': 0.0, 'power_law': 0.0} (48 trials, 28.2 min)
+[tune2] T=256 balanced ok p50=1600.5 {"backend": "p2p_split"}
+[tune2] T=256 default today 1600.5 against 1601.6 (-0.07%): old balanced trials reused
+[tune2] T=256 balanced reused p50=1601.6 {"backend": "p2p_split"}
+[tune2] T=256 power_law ok p50=2876.5 {"backend": "p2p_split"}
+[tune2] T=256 balanced rc=1 p50=inf {"backend": "p2p_split", "dispatch_chunk_tokens": 32, "fc1_utility_postprocess": "on", "k1_ctas_per_sm": 2, "k1_n": 16, "k1_stages": 2, "k2_launch_factor": 2, "k2_n": 32, "k2_ready_queue_bundle": 2, "k2_tail_reclaim": "on", "k2_warps": 8, "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 4}
+[tune2] T=256 balanced rc=1 p50=inf {"backend": "p2p_split", "dispatch_chunk_tokens": 32, "fc1_utility_postprocess": "on", "k1_ctas_per_sm": 2, "k1_n": 16, "k2_launch_factor": 2, "k2_n": 16, "k2_ready_queue_bundle": 2, "k2_tail_reclaim": "on", "k2_warps": 8, "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=256 balanced rc=1 p50=inf {"backend": "p2p_split", "dispatch_chunk_tokens": 32, "fc1_utility_postprocess": "on", "k1_ctas_per_sm": 2, "k1_n": 16, "k1_stages": 3, "k2_launch_factor": 2, "k2_n": 32, "k2_ready_queue_bundle": 2, "k2_tail_reclaim": "on", "k2_warps": 8, "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=256 balanced rc=1 p50=inf {"backend": "p2p_split", "dispatch_chunk_tokens": 32, "fc1_utility_postprocess": "on", "k1_ctas_per_sm": 1, "k1_n": 16, "k1_stages": 3, "k2_launch_factor": 2, "k2_n": 16, "k2_ready_queue_bundle": 2, "k2_tail_reclaim": "on", "k2_warps": 8, "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 4}
+[tune2] T=256 balanced rc=1 p50=inf {"backend": "p2p_split", "dispatch_chunk_tokens": 32, "fc1_utility_postprocess": "on", "k1_ctas_per_sm": 2, "k1_n": 32, "k1_stages": 2, "k2_launch_factor": 2, "k2_n": 16, "k2_ready_queue_bundle": 2, "k2_tail_reclaim": "on", "k2_warps": 8, "sms": [88, 0, 0, 68], "weight_eviction_policy": "default", "weight_prefetch_ahead": 0}
+[tune2] T=256 balanced rc=1 p50=inf {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k2_tail_reclaim": "on", "sms": [112, 0, 0, 44], "weight_eviction_policy": "evict_first"}
+[tune2] T=256 balanced reused p50=1454.4 {"backend": "p2p_split", "k1_stages": 3, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [112, 0, 0, 44], "weight_eviction_policy": "evict_first"}
+[tune2] T=256 power_law ok p50=2955.9 {"backend": "p2p_split", "k1_stages": 3, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [112, 0, 0, 44], "weight_eviction_policy": "evict_first"}
+[tune2] T=256 balanced rc=1 p50=inf {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [112, 0, 0, 44], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 4}
+[tune2] T=256 balanced rc=1 p50=inf {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first"}
+[tune2] T=256 balanced rc=1 p50=inf {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k1_t0_prefetch": 64, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 0}
+[tune2] T=256 balanced reused p50=1423.9 {"backend": "p2p_split", "k1_stages": 3, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first"}
+[tune2] T=256 power_law ok p50=2984.2 {"backend": "p2p_split", "k1_stages": 3, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first"}
+[tune2] T=256 start default {'balanced': 0.0, 'power_law': 0.0} of 1 admissible starts
+[tune2] T=256 balanced ok p50=2110.7 {"backend": "p2p_split", "k1_n": 16}
+[tune2] T=256 balanced ok p50=1739.7 {"backend": "p2p_split", "k1_n": 32}
+[tune2] T=256 balanced ok p50=1640.8 {"backend": "p2p_split", "k2_n": 16}
+[tune2] T=256 balanced ok p50=1563.7 {"backend": "p2p_split", "k2_n": 32}
+[tune2] T=256 power_law ok p50=3149.2 {"backend": "p2p_split", "k2_n": 32}
+[tune2] T=256 balanced ok p50=1600.4 {"backend": "p2p_split", "k2_warps": 8}
+[tune2] T=256 power_law ok p50=2796.9 {"backend": "p2p_split", "k2_warps": 8}
+[tune2] T=256 keep k2_warps=8 {'balanced': -0.07, 'power_law': -2.77}
+[tune2] T=256 balanced rc=1 p50=inf {"backend": "p2p_split", "k2_warps": 12}
+[tune2] T=256 balanced ok p50=1599.9 {"backend": "p2p_split", "k1_ctas_per_sm": 1, "k2_warps": 8}
+[tune2] T=256 power_law ok p50=2870.9 {"backend": "p2p_split", "k1_ctas_per_sm": 1, "k2_warps": 8}
+[tune2] T=256 balanced rc=1 p50=inf {"backend": "p2p_split", "k1_ctas_per_sm": 2, "k2_warps": 8}
+[tune2] T=256 balanced ok p50=1600.0 {"backend": "p2p_split", "k2_launch_factor": 1, "k2_warps": 8}
+[tune2] T=256 power_law ok p50=2900.7 {"backend": "p2p_split", "k2_launch_factor": 1, "k2_warps": 8}
+[tune2] T=256 balanced rc=1 p50=inf {"backend": "p2p_split", "k2_launch_factor": 2, "k2_warps": 8}
+[tune2] T=256 balanced ok p50=1600.7 {"backend": "p2p_split", "k2_warps": 8, "weight_prefetch_ahead": 0}
+[tune2] T=256 power_law ok p50=2932.9 {"backend": "p2p_split", "k2_warps": 8, "weight_prefetch_ahead": 0}
+[tune2] T=256 balanced ok p50=1575.9 {"backend": "p2p_split", "k2_warps": 8, "weight_prefetch_ahead": 4}
+[tune2] T=256 power_law ok p50=2931.4 {"backend": "p2p_split", "k2_warps": 8, "weight_prefetch_ahead": 4}
+[tune2] T=256 balanced ok p50=1584.5 {"backend": "p2p_split", "k2_warps": 8, "weight_prefetch_ahead": 8}
+[tune2] T=256 power_law ok p50=3001.9 {"backend": "p2p_split", "k2_warps": 8, "weight_prefetch_ahead": 8}
+[tune2] T=256 balanced ok p50=1600.9 {"backend": "p2p_split", "k1_stages": 2, "k2_warps": 8}
+[tune2] T=256 power_law ok p50=2975.1 {"backend": "p2p_split", "k1_stages": 2, "k2_warps": 8}
+[tune2] T=256 balanced ok p50=1535.3 {"backend": "p2p_split", "k1_stages": 3, "k2_warps": 8}
+[tune2] T=256 power_law ok p50=2924.6 {"backend": "p2p_split", "k1_stages": 3, "k2_warps": 8}
+[tune2] T=256 balanced ok p50=1601.6 {"backend": "p2p_split", "k2_warps": 8, "sms": [104, 0, 0, 52]}
+[tune2] T=256 power_law ok p50=2971.3 {"backend": "p2p_split", "k2_warps": 8, "sms": [104, 0, 0, 52]}
+[tune2] T=256 balanced ok p50=1691.1 {"backend": "p2p_split", "k2_warps": 8, "sms": [88, 0, 0, 68]}
+[tune2] T=256 balanced ok p50=1562.8 {"backend": "p2p_split", "k2_warps": 8, "sms": [112, 0, 0, 44]}
+[tune2] T=256 power_law ok p50=2898.4 {"backend": "p2p_split", "k2_warps": 8, "sms": [112, 0, 0, 44]}
+[tune2] T=256 balanced ok p50=1644.2 {"backend": "p2p_split", "k2_warps": 8, "sms": [96, 0, 0, 60]}
+[tune2] T=256 balanced ok p50=1523.1 {"backend": "p2p_split", "k2_warps": 8, "sms": [120, 0, 0, 36]}
+[tune2] T=256 power_law ok p50=3243.4 {"backend": "p2p_split", "k2_warps": 8, "sms": [120, 0, 0, 36]}
+[tune2] T=256 balanced ok p50=1584.2 {"backend": "p2p_split", "k2_tail_reclaim": "on", "k2_warps": 8}
+[tune2] T=256 power_law ok p50=3057.9 {"backend": "p2p_split", "k2_tail_reclaim": "on", "k2_warps": 8}
+[tune2] T=256 balanced ok p50=1679.7 {"backend": "p2p_split", "k2_tail_reclaim": "off", "k2_warps": 8}
+[tune2] T=256 balanced rc=1 p50=inf {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k2_warps": 8}
+[tune2] T=256 balanced ok p50=1601.0 {"backend": "p2p_split", "fc1_utility_postprocess": "off", "k2_warps": 8}
+[tune2] T=256 power_law ok p50=2992.2 {"backend": "p2p_split", "fc1_utility_postprocess": "off", "k2_warps": 8}
+[tune2] T=256 balanced ok p50=1571.9 {"backend": "p2p_split", "k2_warps": 8, "weight_eviction_policy": "evict_first"}
+[tune2] T=256 power_law ok p50=3051.5 {"backend": "p2p_split", "k2_warps": 8, "weight_eviction_policy": "evict_first"}
+[tune2] T=256 balanced ok p50=1599.0 {"backend": "p2p_split", "k2_warps": 8, "weight_eviction_policy": "default"}
+[tune2] T=256 power_law ok p50=2859.2 {"backend": "p2p_split", "k2_warps": 8, "weight_eviction_policy": "default"}
+[tune2] T=256 balanced ok p50=1599.3 {"backend": "p2p_split", "k2_warps": 8}
+[tune2] T=256 power_law ok p50=2940.3 {"backend": "p2p_split", "k2_warps": 8}
+[tune2] T=256 balanced reused p50=1605.2 {"backend": "p2p_split"}
+[tune2] T=256 power_law ok p50=2864.0 {"backend": "p2p_split"}
+[tune2] T=256 balanced reused p50=1426.9 {"backend": "p2p_split", "k1_stages": 3, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first"}
+[tune2] T=256 power_law ok p50=2825.0 {"backend": "p2p_split", "k1_stages": 3, "k2_n": 32, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first"}
+[tune2] anchor T=256 done: {"backend": "p2p_split", "k2_warps": 8} against default {'balanced': -0.07, 'power_law': -2.77} mean -1.42% against shipped {'balanced': 12.4, 'power_law': -6.28} (59 trials, 44.6 min)
+[tune2] T=64 balanced ok p50=782.8 {"backend": "p2p_split"}
+[tune2] T=64 default today 782.8 against 789.1 (-0.80%): old balanced trials ignored
+[tune2] T=64 power_law ok p50=1159.1 {"backend": "p2p_split"}
+[tune2] T=64 balanced ok p50=845.2 {"backend": "p2p_split", "dispatch_chunk_tokens": 32, "fc1_utility_postprocess": "on", "k1_ctas_per_sm": 2, "k1_n": 16, "k1_stages": 2, "k2_launch_factor": 2, "k2_n": 32, "k2_ready_queue_bundle": 2, "k2_tail_reclaim": "on", "k2_warps": 8, "weight_eviction_policy": "evict_first", "weight_prefetch_ahead": 4}
+[tune2] 2026-11-26 15:31:30 finished rc=137 -> <work>/w4a8-20261126/tune2/dsv41_ep16.json

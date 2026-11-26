@@ -1,0 +1,17 @@
+[tune2] T=64 power_law ok p50=1157.1 {"backend": "p2p_split"}
+[spot] T=64 default power_law 1157.1
+[tune2] T=64 power_law ok p50=1082.6 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first"}
+[spot] T=64 shipped power_law 1082.6
+[tune2] T=64 power_law ok p50=1067.8 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k2_tail_reclaim": "on", "sms": [112, 0, 0, 44], "weight_eviction_policy": "evict_first"}
+[spot] T=64 generic power_law 1067.8
+[tune2] T=32 power_law ok p50=848.3 {"backend": "p2p_split"}
+[spot] T=32 default power_law 848.3
+[tune2] T=32 power_law ok p50=835.5 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k2_tail_reclaim": "on", "sms": [120, 0, 0, 36], "weight_eviction_policy": "evict_first"}
+[spot] T=32 shipped power_law 835.5
+[tune2] T=32 power_law ok p50=841.3 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k2_tail_reclaim": "on", "sms": [112, 0, 0, 44], "weight_eviction_policy": "evict_first"}
+[spot] T=32 generic power_law 841.3
+[tune2] T=16 power_law ok p50=627.1 {"backend": "p2p_split"}
+[spot] T=16 default power_law 627.1
+[tune2] T=16 power_law ok p50=570.3 {"backend": "p2p_split", "fc1_utility_postprocess": "on", "k1_stages": 3, "k2_tail_reclaim": "on", "sms": [112, 0, 0, 44], "weight_eviction_policy": "evict_first"}
+[spot] T=16 shipped power_law 570.3
+[spot] T=16 generic power_law 570.3
