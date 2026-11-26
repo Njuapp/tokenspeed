@@ -3,6 +3,9 @@
 # two variables are ignored). Launch with OPT_MOE_BACKEND=mega_moe_split.
 #   compile buckets at the row counts of DSpark decode steps (6 rows per request, 1 to 32 requests per GPU)
 #   packed dispatch for every bucket instead of from 32 rows per rank
+# Measured in engines: the 6- and 12-row buckets help, 24, 48 and 192 change nothing, and the 96-row bucket is
+# 2% to 3% slower end to end at 16 requests per GPU although it is faster on balanced routes. Drop 96 from the list
+# if that is your load (96 rows then run the default 128-row bucket).
 # Add your workload's static expert placement (../placement/README.md):
 #   export TOKENSPEED_MOE_EXPERT_PLACEMENT=/path/to/placement.json
 source "$(dirname "${BASH_SOURCE[0]}")/d7-same.sh"

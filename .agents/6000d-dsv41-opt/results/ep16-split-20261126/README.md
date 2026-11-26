@@ -46,6 +46,8 @@ over the ranks and `EVEN_RESULT`, the number we quote) and the device memory at 
 | `rt16-split-r0-1126a` | Split kernels: tuned table, packed dispatch, default buckets, permutation placement |
 | `rt16-splitrule-r0-1126a` | The same with the rule-based selection instead of the table |
 | `rt16-splitnopack-r0-1126a` | The same as the first with the packed dispatch off |
+| `rt16-split-r0-b6-1126a` | Split kernels with `d7-same-split-ep16.sh` (buckets at 6 x 2^N rows, every bucket packs), permutation placement; adds 12 requests per GPU (CC 192), where only two waves were spread evenly |
+| `rt16-cake-r0-c192-1126a` | Persistent kernel at 12 requests per GPU, permutation placement |
 
 
 ## `steptime/` (decode step in milliseconds, the step-time measurement of `launch/README.md`)

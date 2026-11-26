@@ -36,7 +36,9 @@ only behaviour that changes is the first item.
    launch graphs (start-up time and device memory). Note that a 24-row bucket is below the default packing
    threshold of 32 rows: without item 2 it is slower than the default 32-row bucket. In an engine, items 2 and 3
    together shortened the decode step by 1.8% and 4.0% at 1 and 2 requests per rank, changed nothing at 4, 8 and
-   32 and lengthened it by 2.1% at 16 (synthetic tokens, permutation placement, one run each).
+   32 and lengthened it by 2.1% at 16 (synthetic tokens, permutation placement, one run each); on real text they
+   gave 1.2% and 3.0% more output at 1 and 2 requests per GPU and 2.7% less at 16. The 96-row bucket is faster
+   on balanced routes only: leave it out for traffic around 16 requests per GPU.
 
 All three must have the same value on every EP rank. `../switch-sets/d7-same-split-ep16.sh` sets items 2 and 3
 the way the engine runs used them.
