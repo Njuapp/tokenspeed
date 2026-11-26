@@ -604,11 +604,14 @@ tables for setups FlashInfer ships none for, in FlashInfer's table schema.
 They are added to FlashInfer's lookup before the first layer is built, and a
 log line names the ones added and a digest of the resulting table set.
 
-The file holds one table: DeepSeek-V4.1-Flash (384 expert slots) at EP16 over
-two hosts of two 4-GPU NUMA nodes each, on GPUs with 156 SMs. Its anchors for
+The file holds the table of DeepSeek-V4.1-Flash (384 expert slots) at EP16
+over two hosts of two 4-GPU NUMA nodes each, on GPUs with 156 SMs, and the
+same table once more for 448 expert slots (a static placement with 4 replica
+slots per rank; the knobs are not tuned at that slot count). The anchors for
 16 to 256 rows per rank are tuned; the larger row buckets have anchors that
 name the transport only, which leaves them to FlashInfer's rule-based
-selection.
+selection. The 96-row anchor is read only by a FlashInfer that compiles a
+96-row bucket; with the default buckets 96 rows run the 128-row bucket.
 
 - A table's key is its `signature` (hidden size, gate + up intermediate size,
   top-k, expert slots), its `topology` (FlashInfer's name for the EP layout:
@@ -620,8 +623,9 @@ selection.
 - Gaps only: a key that FlashInfer's own file has is left to FlashInfer, whose
   table takes over from ours once it ships one.
 - The signature counts expert slots. A placement with replicas has more slots
-  than the model has experts, matches no table of the plain model and keeps
-  FlashInfer's rule-based selection.
+  than the model has experts and matches no table of the plain model: it
+  needs a table of its own slot count (384 plus 16 per replica slot of a rank
+  at EP16), otherwise it keeps FlashInfer's rule-based selection.
 - Every EP rank has to read the same tables. Building a layer compares the
   digest across the ranks and raises if they differ, for example when one
   host carries another file.

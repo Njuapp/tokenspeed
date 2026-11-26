@@ -2,10 +2,10 @@
  "schema": 1,
  "provenance": {
   "tool": "tune_table.py of the split kernels' tuning tools (kernel source snapshot 3b377cd), reduced as their merge_table.py does",
-  "measurement": "the kernels' standalone runner: whole launch graph, p50 of 100 rounds after 20 warm-up rounds, balanced routes, cold L2, packed cross-NUMA dispatch off (MEGAMOE_XNUMA_PACK=0 from 32 rows per rank; the runner does not pack below that), as the adapter of FlashInfer 0dc6f0785abd runs it; each GPU pinned to the RDMA NIC on its PCIe switch",
+  "measurement": "the kernels' standalone runner: whole launch graph, p50 of 100 rounds after 20 warm-up rounds, cold L2; each GPU pinned to the RDMA NIC on its PCIe switch. Anchors 16, 32, 64, 128 and 256 (2026-11-25): balanced routes, packed cross-NUMA dispatch off (MEGAMOE_XNUMA_PACK=0), as the adapter of FlashInfer 0dc6f0785abd ran it. Anchor 96 (2026-11-26): balanced and power_law routes (Zipf exponent 1.0), packed dispatch on as the runner selects it",
   "setup": "EP16 over two hosts of 8 GPUs each (two NUMA nodes of 4 GPUs per host), 156 SMs per GPU",
-  "fields": "p50_us: the selected configuration; default_us: the rule-based configuration, same runner; confirm: the same pair on a second route seed",
-  "selection": "the tuner's selection per anchor, except 32 rows (see its note); every anchor was then timed through this backend's wrapper with balanced routes and with recorded decode routes, with a reference check of the output",
+  "fields": "p50_us: the selected configuration on balanced routes; default_us: the rule-based configuration, same runner; power_law_us / default_power_law_us: the same pair on power_law routes; confirm: the pairs on a second route seed",
+  "selection": "anchors 16 to 256: the tuner's selection per anchor on balanced routes, except 32 rows (see its note); with the packed dispatch the same tuner selects the same knobs at 16, 64, 128 and 256 rows, and at 128 rows the two-route rule below ends on the same knobs. Anchor 96: the two-route rule (tune_two_routes.py --rule sequential: the rule-based default is the first baseline; a candidate more than 0.5% slower than the current baseline on balanced or on power_law routes is excluded, otherwise it replaces the baseline if the mean of its two times is lower; a power_law time is the median of 3 trials). Every anchor was then timed through this backend's wrapper with a reference check of the output",
   "untuned": "anchors that name only the transport keep FlashInfer's rule-based selection for the row buckets above the tuned decode sizes"
  },
  "tables": [
@@ -31,7 +31,8 @@
     "seed": 9341,
     "route": "balanced",
     "min_gain": 0.005,
-    "xnuma_pack": false
+    "xnuma_pack": false,
+    "note": "anchor 96 was measured on balanced and power_law routes with the packed dispatch; see provenance"
    },
    "entries": [
     {
@@ -103,6 +104,37 @@
       "default_us": 901.5,
       "seed": 6197
      }
+    },
+    {
+     "tokens": 96,
+     "knobs": {
+      "backend": "p2p_split",
+      "fc1_utility_postprocess": "on",
+      "k1_stages": 3,
+      "k2_n": 32,
+      "k2_tail_reclaim": "on",
+      "weight_eviction_policy": "evict_first",
+      "weight_prefetch_ahead": 0,
+      "sms": [
+       120,
+       0,
+       0,
+       36
+      ],
+      "k1_t0_prefetch": 64
+     },
+     "p50_us": 763.6,
+     "default_us": 904.7,
+     "power_law_us": 1143.4,
+     "default_power_law_us": 1291.7,
+     "confirm": {
+      "seed": 6197,
+      "best_us": 770.9,
+      "default_us": 908.6,
+      "best_power_law_us": 1150.1,
+      "default_power_law_us": 1154.6
+     },
+     "note": "tuned at the row count of 16 DSpark decode requests per GPU (6 rows per request). The default row buckets have no 96-row bucket (96 rows run the 128-row bucket and its anchor), so this anchor is used only by a FlashInfer that compiles one (see .agents/6000d-dsv41-opt/flashinfer/README.md). The rule ended on the knobs of the 128-row anchor"
     },
     {
      "tokens": 128,
@@ -196,6 +228,227 @@
      "note": "not tuned: the transport only, FlashInfer's rule-based selection applies"
     }
    ]
+  },
+  {
+   "model": "dsv41",
+   "signature": [
+    5120,
+    4608,
+    6,
+    448
+   ],
+   "topology": "ep16_2x2numa",
+   "device": [
+    156,
+    8,
+    8
+   ],
+   "protocol": {
+    "timing": "pr_timing whole_graph",
+    "cold_l2": true,
+    "warmup": 20,
+    "rounds": 100,
+    "seed": 9341,
+    "route": "balanced",
+    "min_gain": 0.005,
+    "xnuma_pack": false,
+    "note": "anchor 96 was measured on balanced and power_law routes with the packed dispatch; see provenance"
+   },
+   "entries": [
+    {
+     "tokens": 16,
+     "knobs": {
+      "k1_stages": 3,
+      "k2_tail_reclaim": "on",
+      "fc1_utility_postprocess": "on",
+      "weight_eviction_policy": "evict_first",
+      "backend": "p2p_split",
+      "sms": [
+       112,
+       0,
+       0,
+       44
+      ]
+     },
+     "p50_us": 552.2,
+     "default_us": 658.9,
+     "confirm": {
+      "best_us": 552.3,
+      "default_us": 666.4,
+      "seed": 6197
+     }
+    },
+    {
+     "tokens": 32,
+     "knobs": {
+      "k1_stages": 3,
+      "k2_tail_reclaim": "on",
+      "fc1_utility_postprocess": "on",
+      "weight_eviction_policy": "evict_first",
+      "backend": "p2p_split",
+      "sms": [
+       120,
+       0,
+       0,
+       36
+      ]
+     },
+     "p50_us": 608.6,
+     "default_us": 749.6,
+     "confirm": {
+      "best_us": 609.0,
+      "default_us": 750.2,
+      "seed": 6197
+     },
+     "note": "the 64-row anchor's knobs, measured with the same runner and protocol; the tuner's own selection for 32 rows (SM split 112/44, K1 tile N16, push dispatch off) read 610.2 us and 614.9 us on the second seed, and through this backend it was about 10% slower than with these knobs on recorded decode routes at 4 requests per rank"
+    },
+    {
+     "tokens": 64,
+     "knobs": {
+      "k1_stages": 3,
+      "k2_tail_reclaim": "on",
+      "fc1_utility_postprocess": "on",
+      "weight_eviction_policy": "evict_first",
+      "backend": "p2p_split",
+      "sms": [
+       120,
+       0,
+       0,
+       36
+      ]
+     },
+     "p50_us": 761.2,
+     "default_us": 901.7,
+     "confirm": {
+      "best_us": 763.3,
+      "default_us": 901.5,
+      "seed": 6197
+     }
+    },
+    {
+     "tokens": 96,
+     "knobs": {
+      "backend": "p2p_split",
+      "fc1_utility_postprocess": "on",
+      "k1_stages": 3,
+      "k2_n": 32,
+      "k2_tail_reclaim": "on",
+      "weight_eviction_policy": "evict_first",
+      "weight_prefetch_ahead": 0,
+      "sms": [
+       120,
+       0,
+       0,
+       36
+      ],
+      "k1_t0_prefetch": 64
+     },
+     "p50_us": 763.6,
+     "default_us": 904.7,
+     "power_law_us": 1143.4,
+     "default_power_law_us": 1291.7,
+     "confirm": {
+      "seed": 6197,
+      "best_us": 770.9,
+      "default_us": 908.6,
+      "best_power_law_us": 1150.1,
+      "default_power_law_us": 1154.6
+     },
+     "note": "tuned at the row count of 16 DSpark decode requests per GPU (6 rows per request). The default row buckets have no 96-row bucket (96 rows run the 128-row bucket and its anchor), so this anchor is used only by a FlashInfer that compiles one (see .agents/6000d-dsv41-opt/flashinfer/README.md). The rule ended on the knobs of the 128-row anchor"
+    },
+    {
+     "tokens": 128,
+     "knobs": {
+      "backend": "p2p_split",
+      "fc1_utility_postprocess": "on",
+      "k1_stages": 3,
+      "k2_n": 32,
+      "k2_tail_reclaim": "on",
+      "weight_eviction_policy": "evict_first",
+      "weight_prefetch_ahead": 0,
+      "sms": [
+       120,
+       0,
+       0,
+       36
+      ],
+      "k1_t0_prefetch": 64
+     },
+     "p50_us": 1099.6,
+     "default_us": 1255.6,
+     "confirm": {
+      "best_us": 1101.3,
+      "default_us": 1256.8,
+      "seed": 6197
+     }
+    },
+    {
+     "tokens": 256,
+     "knobs": {
+      "backend": "p2p_split",
+      "k1_stages": 3,
+      "k2_tail_reclaim": "on",
+      "sms": [
+       120,
+       0,
+       0,
+       36
+      ],
+      "weight_eviction_policy": "evict_first",
+      "k2_n": 32
+     },
+     "p50_us": 1872.1,
+     "default_us": 2050.1,
+     "confirm": {
+      "best_us": 1873.3,
+      "default_us": 2052.0,
+      "seed": 6197
+     }
+    },
+    {
+     "tokens": 320,
+     "knobs": {
+      "backend": "p2p_split"
+     },
+     "note": "not tuned: the transport only, FlashInfer's rule-based selection applies"
+    },
+    {
+     "tokens": 384,
+     "knobs": {
+      "backend": "p2p_split"
+     },
+     "note": "not tuned: the transport only, FlashInfer's rule-based selection applies"
+    },
+    {
+     "tokens": 512,
+     "knobs": {
+      "backend": "p2p_split"
+     },
+     "note": "not tuned: the transport only, FlashInfer's rule-based selection applies"
+    },
+    {
+     "tokens": 1024,
+     "knobs": {
+      "backend": "p2p_split"
+     },
+     "note": "not tuned: the transport only, FlashInfer's rule-based selection applies"
+    },
+    {
+     "tokens": 2048,
+     "knobs": {
+      "backend": "p2p_split"
+     },
+     "note": "not tuned: the transport only, FlashInfer's rule-based selection applies"
+    },
+    {
+     "tokens": 4096,
+     "knobs": {
+      "backend": "p2p_split"
+     },
+     "note": "not tuned: the transport only, FlashInfer's rule-based selection applies"
+    }
+   ],
+   "note": "the table above registered for a static placement with 4 replica slots per rank (448 expert slots); the knobs were not tuned at this slot count"
   }
  ]
 }

@@ -675,8 +675,9 @@ def test_flashinfer_finds_our_anchors(flashinfer_tables):
 
     for tokens in ROW_BUCKETS:
         assert tuned_table.nearest_entry(DSV41, EP16, tokens, SM156) in ours["entries"]
-    # Expert replicas add slots, and the slot count is part of the signature.
-    with_replicas = (*DSV41[:3], 448)
+    # Expert replicas add slots, and the slot count is part of the signature:
+    # a slot count the file has no table for (it has one for 448) finds nothing.
+    with_replicas = (*DSV41[:3], 416)
     assert tuned_table.nearest_entry(with_replicas, EP16, 16, SM156) is None
 
 
@@ -723,9 +724,9 @@ def test_the_check_before_an_install_accepts_the_tables_flashinfer_ships(
         split._resolve_anchors(table, tuned_table, heuristic)
 
 
-# A table for a placement with expert replicas, which neither FlashInfer nor
-# our file has, and knobs FlashInfer resolves for it.
-WITH_REPLICAS = (*DSV41[:3], 448)
+# A table for a placement with expert replicas at a slot count that neither
+# FlashInfer nor our file has, and knobs FlashInfer resolves for it.
+WITH_REPLICAS = (*DSV41[:3], 416)
 RESOLVABLE = {
     "backend": "p2p_split",
     "k1_stages": 3,
