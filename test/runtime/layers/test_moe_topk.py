@@ -238,3 +238,66 @@ def test_simulated_routing_spreads_tokens_over_fixed_experts(
 
     again = topk(hidden_states[:4], router_logits[:4]).router_logits
     assert torch.equal(again, logits[:4])
+
+
+@pytest.mark.parametrize(
+    ("ep_size", "top_k", "experts"),
+    [(8, 6, 384), (16, 6, 384), (8, 3, 128), (16, 3, 128)],
+)
+def test_balanced_routing_gives_every_expert_the_same_rows(
+    monkeypatch: pytest.MonkeyPatch, ep_size: int, top_k: int, experts: int
+) -> None:
+    monkeypatch.setattr(topk_module, "_balanced_logits", {})
+    monkeypatch.setattr(topk_module, "_balanced_routers", set())
+    for rows in (6, 12, 48, 192):
+        counts = torch.zeros(experts, dtype=torch.long)
+        for ep_rank in range(ep_size):
+            logits = topk_module.balanced_router_logits(
+                torch.zeros(rows, experts), top_k, ep_rank, ep_size
+            )
+            assert logits.shape == (rows, experts)
+            ids = logits.topk(top_k, dim=1).indices
+            # Exactly top_k experts stand out on every row.
+            assert (logits.gather(1, ids) == 30).all()
+            assert int((logits > 0).sum()) == rows * top_k
+            counts += torch.bincount(ids.flatten(), minlength=experts)
+        # Equal rows on every rank: every expert within one row of the others,
+        # and every owner rank (contiguous ownership) the same total.
+        assert int(counts.max() - counts.min()) <= 1
+        per_rank = counts.view(ep_size, -1).sum(1)
+        assert int(per_rank.max()) == int(per_rank.min())
+
+
+def test_balanced_routing_builds_the_registered_routers_together(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(topk_module, "_balanced_logits", {})
+    # A target model and its draft model, both on EP rank 3 of 8.
+    monkeypatch.setattr(
+        topk_module, "_balanced_routers", {(384, 6, 3, 8), (128, 3, 3, 8)}
+    )
+    topk_module.balanced_router_logits(torch.zeros(6, 384), 6, 3, 8)
+    built = sorted(key[2:] for key in topk_module._balanced_logits)
+    assert built == [(128, 3, 3, 8), (384, 6, 3, 8)]
+    # The draft's table is there without another build.
+    draft = topk_module.balanced_router_logits(torch.zeros(18, 128), 3, 3, 8)
+    assert draft.shape == (18, 128)
+
+    with pytest.raises(ValueError, match="divide"):
+        topk_module.balanced_router_logits(torch.zeros(6, 100), 6, 0, 16)
+
+
+def test_topk_reads_the_routing_simulation_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TOKENSPEED_MOE_ROUTING_SIMULATION", "balanced")
+    topk = TopK(top_k=6)
+    assert topk.simulate_routing and topk.simulate_balanced_routing
+
+    monkeypatch.setenv("TOKENSPEED_MOE_ROUTING_SIMULATION", "uniform")
+    topk = TopK(top_k=6)
+    assert topk.simulate_routing and not topk.simulate_balanced_routing
+
+    monkeypatch.setenv("TOKENSPEED_MOE_ROUTING_SIMULATION", "even")
+    with pytest.raises(ValueError, match="balanced"):
+        TopK(top_k=6)

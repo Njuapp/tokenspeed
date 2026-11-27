@@ -44,6 +44,8 @@ from tokenspeed.runtime.layers.moe.topk import (
     StandardTopKOutput,
     TopK,
     TopKOutput,
+    _balanced_routers,
+    balanced_router_logits,
     simulated_router_logits,
 )
 from tokenspeed.runtime.layers.moe.utils import RoutingMethodType, get_moe_backend
@@ -188,6 +190,9 @@ class DeepseekV4TopK(TopK):
         routed_scaling_factor: float,
         hash_routing: bool,
         weights_dtype: torch.dtype,
+        ep_rank: int = 0,
+        ep_size: int = 1,
+        num_experts: int = 0,
     ) -> None:
         super().__init__(
             top_k=top_k,
@@ -197,6 +202,11 @@ class DeepseekV4TopK(TopK):
         )
         self.hash_routing = hash_routing
         self.weights_dtype = weights_dtype
+        # For TOKENSPEED_MOE_ROUTING_SIMULATION=balanced only.
+        self.ep_rank = ep_rank
+        self.ep_size = ep_size
+        if self.simulate_balanced_routing and num_experts:
+            _balanced_routers.add((num_experts, top_k, ep_rank, ep_size))
 
     def forward(
         self,
@@ -211,7 +221,11 @@ class DeepseekV4TopK(TopK):
             if routing_correction_bias is None
             else routing_correction_bias
         )
-        if self.simulate_routing:
+        if self.simulate_balanced_routing:
+            router_logits = balanced_router_logits(
+                router_logits, self.topk_config.top_k, self.ep_rank, self.ep_size
+            )
+        elif self.simulate_routing:
             router_logits = simulated_router_logits(router_logits)
         topk_weights, topk_ids = moe_topk(
             router_logits,
@@ -429,6 +443,9 @@ class DeepseekV4MoE(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
             hash_routing=self.gate.tid2eid is not None,
             weights_dtype=self.experts.topk_weights_dtype,
+            ep_rank=mapping.moe.ep_rank,
+            ep_size=mapping.moe.ep_size,
+            num_experts=config.n_routed_experts,
         )
         # True once the MegaMoE kernel runs this layer's shared expert itself:
         # its output is then routed + shared and the dense path is skipped.

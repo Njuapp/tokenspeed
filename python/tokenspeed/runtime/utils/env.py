@@ -377,7 +377,9 @@ class Envs:
     TOKENSPEED_MOE_PADDING = EnvBool(False)
     TOKENSPEED_MOE_CONFIG_DIR = EnvStr(None)
     # "uniform" routes each token to a fixed random set of experts, so dummy
-    # weights spread MoE traffic like a trained router does.
+    # weights spread MoE traffic like a trained router does. "balanced" gives
+    # every expert the same number of rows when the EP ranks hold equal rows
+    # (DeepSeek V4 only; the even load an expert placement aims at).
     TOKENSPEED_MOE_ROUTING_SIMULATION = EnvStr("")
     # Tokens per request each speculative verify step keeps, on average, in
     # place of what verification accepted. A raw string so malformed input

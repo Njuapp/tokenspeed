@@ -18,6 +18,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -453,6 +454,78 @@ def simulated_router_logits(router_logits: torch.Tensor) -> torch.Tensor:
     return table[:tokens]
 
 
+_balanced_logits: dict[tuple, torch.Tensor] = {}
+# (experts, top_k, ep_rank, ep_size) of every router built in balanced mode: all their
+# tables are made together, the first time one is needed outside capture.
+_balanced_routers: set[tuple[int, int, int, int]] = set()
+
+
+def _balanced_table(
+    rows: int, experts: int, top_k: int, ep_rank: int, ep_size: int
+) -> torch.Tensor:
+    per_rank = experts // ep_size
+    within_rank = torch.randperm(per_rank, generator=torch.Generator().manual_seed(0))
+    position = torch.arange(experts)
+    order = (position % ep_size) * per_rank + within_rank[position // ep_size]
+    period = experts // math.gcd(experts, ep_size * top_k)
+    row = torch.arange(rows)
+    launch_row = row * ep_size + (ep_rank + row // period) % ep_size
+    chosen = order[
+        (launch_row[:, None] * top_k + torch.arange(top_k)[None, :]) % experts
+    ]
+    # Far apart, so no score correction bias changes the choice.
+    table = torch.full((rows, experts), -30.0)
+    table.scatter_(1, chosen, 30.0)
+    return table
+
+
+def balanced_router_logits(
+    router_logits: torch.Tensor, top_k: int, ep_rank: int, ep_size: int
+) -> torch.Tensor:
+    """Return logits that spread one launch's rows evenly over the experts.
+
+    A launch is laid out as rows ``g = 0, 1, ...``; row ``g`` takes the
+    ``top_k`` consecutive entries from ``g * top_k`` of an expert order that
+    cycles through the EP ranks under contiguous ownership (entry ``p`` is
+    owned by rank ``p % ep_size``; which of that rank's experts is seeded).
+    Row ``i`` of EP rank ``r`` is launch row ``i * ep_size + q`` with
+    ``q = (r + i // period) % ep_size``: at every ``i`` the ranks hold the
+    ``ep_size`` launch rows of that ``i`` between them, and the rotation by
+    ``period`` rows lets each rank reach every expert instead of a fixed few.
+
+    When every rank holds the same number of rows, every expert receives the
+    same number of rows to within one and every rank's experts the same total.
+    Like the uniform table, the rows are a view of a table that grows only
+    outside graph capture.
+    """
+    tokens, experts = router_logits.shape
+    device, dtype = router_logits.device, router_logits.dtype
+    key = (device, dtype, experts, top_k, ep_rank, ep_size)
+    table = _balanced_logits.get(key)
+    if table is None or table.shape[0] < tokens:
+        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                f"balanced routing table has no rows for {tokens} tokens "
+                "during graph capture"
+            )
+        if experts % ep_size:
+            raise ValueError(
+                f"balanced routing needs the {experts} experts to divide over "
+                f"EP size {ep_size}"
+            )
+        rows = max(tokens, _SIMULATED_ROUTING_MIN_ROWS)
+        for router in _balanced_routers | {(experts, top_k, ep_rank, ep_size)}:
+            other = (device, dtype, *router)
+            if router[0] % router[3] == 0 and (
+                other == key or other not in _balanced_logits
+            ):
+                _balanced_logits[other] = _balanced_table(rows, *router).to(
+                    device=device, dtype=dtype
+                )
+        table = _balanced_logits[key]
+    return table[:tokens]
+
+
 class TopK(torch.nn.Module):
 
     def __init__(
@@ -519,12 +592,15 @@ class TopK(torch.nn.Module):
             sink_global_scale=sink_global_scale,
         )
         routing_simulation = envs.TOKENSPEED_MOE_ROUTING_SIMULATION.get()
-        if routing_simulation not in ("", "uniform"):
+        if routing_simulation not in ("", "uniform", "balanced"):
             raise ValueError(
-                "TOKENSPEED_MOE_ROUTING_SIMULATION must be unset or 'uniform', "
-                f"got {routing_simulation!r}"
+                "TOKENSPEED_MOE_ROUTING_SIMULATION must be unset, 'uniform' or "
+                f"'balanced', got {routing_simulation!r}"
             )
-        self.simulate_routing = routing_simulation == "uniform"
+        self.simulate_routing = routing_simulation in ("uniform", "balanced")
+        # "balanced" needs the caller's EP rank (balanced_router_logits); a
+        # model that does not pass one keeps the uniform table.
+        self.simulate_balanced_routing = routing_simulation == "balanced"
 
     def forward(
         self,
