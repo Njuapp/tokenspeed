@@ -389,6 +389,9 @@ def test_lm_head_checkpoint_and_logits_follow_model_dtype(
     adapter.mapping = _mapping(rank, tp_size, world_size)
     adapter.encoder_only = False
     adapter.vision = None
+    # What __init__ sets for the expert placement file; none is named here.
+    adapter._expert_placement = None
+    adapter._expert_placement_resolved = False
     adapter.model = nn.Module()
     adapter.model.config = config
     with set_default_torch_dtype(dtype), torch.device(device):
@@ -2171,6 +2174,10 @@ class _TinyFp8Model(BaseCausalLM):
 
     def post_quant_warmup(self):
         DeepseekV41ForCausalLM.post_quant_warmup(self)
+
+    def _require_expert_placement_applied(self):
+        # No routed experts here, so nothing a placement file applies to.
+        return None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
