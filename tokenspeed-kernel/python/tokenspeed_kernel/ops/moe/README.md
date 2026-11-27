@@ -613,6 +613,15 @@ name the transport only, which leaves them to FlashInfer's rule-based
 selection. The 96-row anchor is read only by a FlashInfer that compiles a
 96-row bucket; with the default buckets 96 rows run the 128-row bucket.
 
+It also holds FlashInfer's own EP8 table for these GPUs (384 expert slots),
+unchanged, under 408, 416 and 448 expert slots: a static placement with 3, 4
+or 8 replica slots per rank at EP8, which FlashInfer would otherwise run on
+its rule-based selection. The knobs are not tuned at these slot counts
+either. The placement solver decides how many replica slots a file has (it
+copies only the experts above its load threshold), so a file asked for 8 can
+have 3: check the slot count in the engine log line of
+`TOKENSPEED_MOE_EXPERT_PLACEMENT` against the tables named in the log.
+
 - A table's key is its `signature` (hidden size, gate + up intermediate size,
   top-k, expert slots), its `topology` (FlashInfer's name for the EP layout:
   `ep16_2x2numa` is two hosts of two 4-GPU NUMA nodes each) and its `device`
