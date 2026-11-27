@@ -53,6 +53,7 @@ from tokenspeed.runtime.execution.output_layout import ForwardOutputLayout
 from tokenspeed.runtime.layers.attention.kv_cache.recipes.spec import (
     compute_max_logical_pages_for_capture,
 )
+from tokenspeed.runtime.moe.expert_file_placement import expert_load_profile
 from tokenspeed.runtime.moe.expert_load_rows import ExpertLoadRowMask
 from tokenspeed.runtime.moe.expert_location import (
     get_global_expert_location_metadata,
@@ -663,6 +664,12 @@ class ForwardStepRunner:
                 )
             return self._forward_func(bs=bs, ctx=ctx, sampling_info=sampling_info)
 
+        # The warm-up and capture forwards carry dummy rows only: keep them
+        # out of the TOKENSPEED_MOE_LOAD_PROFILE counters.
+        load_profile = expert_load_profile()
+        if load_profile is not None:
+            load_profile.mark_live_requests(0, 1)
+
         global _is_cuda_graph_phase
         _is_cuda_graph_phase = True
 
@@ -736,6 +743,8 @@ class ForwardStepRunner:
         dist.barrier()
         _is_capture_mode = False
         _is_cuda_graph_phase = False
+        if load_profile is not None:
+            load_profile.mark_live_requests(1, 1)
 
         # Drop the capture's unconsumed batch; the first replay would pop it.
         if self.capturable_grammar is not None:
@@ -767,6 +776,11 @@ class ForwardStepRunner:
         global _is_cuda_graph_phase
         old_cuda_graph_phase = _is_cuda_graph_phase
         _is_cuda_graph_phase = graph_phase
+        # Dummy rows: not load (see _capture_one).
+        load_profile = expert_load_profile()
+        previous_marks = (
+            load_profile.mark_live_requests(0, 1) if load_profile is not None else None
+        )
         try:
             for bs in batch_sizes:
                 self._prepare_request_token_history_graph_inputs(
@@ -852,6 +866,8 @@ class ForwardStepRunner:
                     self.sampling_backend.reset_capture_state()
         finally:
             _is_cuda_graph_phase = old_cuda_graph_phase
+            if load_profile is not None:
+                load_profile.mark_live_requests(*previous_marks)
 
     def placeholder_block_tables(self, bs: int) -> dict[str, torch.Tensor]:
         """Per-group placeholder tables for capture / idle / warmup forwards.
@@ -1250,6 +1266,12 @@ class ForwardStepRunner:
                         else [ctx.input_num_tokens] * self.world_size
                     ),
                 )
+            # TOKENSPEED_MOE_LOAD_PROFILE counts this rank's real requests
+            # only: the rows that pad the batch to the replayed graph (all of
+            # them on an idle rank) are filler.
+            load_profile = expert_load_profile()
+            if load_profile is not None:
+                previous_marks = load_profile.mark_live_requests(bs, padded_bs)
             with (
                 torch.inference_mode() if self.device == "npu" else nullcontext()
             ), nvtx_range("graph_replay", color="red"):
@@ -1259,6 +1281,8 @@ class ForwardStepRunner:
                     graph.replay()
             if self._expert_load_rows is not None:
                 self._expert_load_rows.clear()
+            if load_profile is not None:
+                load_profile.mark_live_requests(*previous_marks)
 
             result = live_graph_outputs(
                 self.output_buffers[graph_key], bs, self.max_tokens_per_req

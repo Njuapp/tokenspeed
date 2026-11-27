@@ -34,6 +34,10 @@ SM120 MegaMoE), both off unless their environment variable is set:
 ``TOKENSPEED_MOE_LOAD_PROFILE=<directory>``
     Every rank counts, per MoE layer, the routes its own rows send to each
     logical expert and writes the totals to ``<directory>/rank<r>.json``.
+    Only real rows count: the filler rows of a padded decode graph replay
+    (every rank replays the busiest rank's batch) and the dummy rows of graph
+    warm-up and capture are left out, unless
+    ``TOKENSPEED_MOE_LOAD_PROFILE_LIVE_ROWS=0`` asks for every row.
     The file is written from eager forwards only. A process that serves from
     CUDA graphs keeps counting on the GPU but runs no Python in the layer and
     is killed without exit handlers, so its file stays at the last eager
@@ -82,6 +86,9 @@ EXPERT_PLACEMENT_ENV = "TOKENSPEED_MOE_EXPERT_PLACEMENT"
 LOAD_PROFILE_ENV = "TOKENSPEED_MOE_LOAD_PROFILE"
 # Forwards between two writes of the profile (default 200).
 LOAD_PROFILE_INTERVAL_ENV = "TOKENSPEED_MOE_LOAD_PROFILE_INTERVAL"
+# "0": count every row a forward feeds the MoE layers, the filler rows of
+# padded graph replays included (the count before this switch existed).
+LOAD_PROFILE_LIVE_ROWS_ENV = "TOKENSPEED_MOE_LOAD_PROFILE_LIVE_ROWS"
 PLACEMENT_FORMAT = "tokenspeed-moe-expert-placement/1"
 PLACEMENT_FORMAT_REPLICAS = "tokenspeed-moe-expert-placement/2"
 # The fused kernel holds at most this many expert slots per rank.
@@ -423,6 +430,8 @@ class LayerLoadCounter:
             )
         if max_rows is not None and max_rows > 0:
             self.profile.reserve_ones(max_rows * self.top_k, device)
+        if self.profile.live_rows_only:
+            self.profile.reserve_live_rows(max(max_rows or 1, 1), device)
 
     def record(self, topk_ids: torch.Tensor, mode: int) -> None:
         """Count this forward's routes: one index-add launch, no host sync.
@@ -445,7 +454,13 @@ class LayerLoadCounter:
                 self.dropped += 1
                 return
             self.allocate(topk_ids.device)
-        ones = self.profile.ones(count, topk_ids.device, capturing)
+        if self.profile.live_rows_only and topk_ids.dim() == 2:
+            # 1 per route of a real row, 0 per route of a filler row.
+            ones = self.profile.live_route_weights(
+                topk_ids.shape[0], topk_ids.shape[1], topk_ids.device, capturing
+            )
+        else:
+            ones = self.profile.ones(count, topk_ids.device, capturing)
         if ones is None:
             self.dropped += 1
             return
@@ -477,6 +492,17 @@ class ExpertLoadProfile:
         # Buffers ``_ones`` replaced. A captured graph's index-add reads its
         # buffer by address on every replay, so none is ever freed.
         self._superseded_ones: list[torch.Tensor] = []
+        # Which rows count. A padded decode graph replay (every rank replays
+        # the busiest rank's batch; an idle rank replays filler only) feeds
+        # filler rows through every MoE layer. The forward step marks, before
+        # a replay, how many of the replayed requests are real: two int64
+        # device scalars [live, replayed] the captured index-adds read.
+        # (1, 1) between replays: every row of an eager forward counts.
+        self.live_rows_only = os.environ.get(LOAD_PROFILE_LIVE_ROWS_ENV, "1") != "0"
+        self._live_marks: torch.Tensor | None = None
+        self._live_marks_host: tuple[int, int] = (1, 1)
+        self._row_index: torch.Tensor | None = None
+        self._superseded_row_index: list[torch.Tensor] = []
         self._forwards_since_write = 0
         self._last_write = time.monotonic()
         self._writes = 0
@@ -543,6 +569,64 @@ class ExpertLoadProfile:
             dtype=torch.int64,
             device=device,
         )
+
+    def reserve_live_rows(self, rows: int, device: torch.device) -> None:
+        """Create the live-row marks and the row index; call outside capture."""
+        if self._live_marks is None:
+            self._live_marks = torch.tensor(
+                self._live_marks_host, dtype=torch.int64, device=device
+            )
+        if self._row_index is None or self._row_index.numel() < rows:
+            if self._row_index is not None:
+                # Graphs captured so far keep reading the old buffer.
+                self._superseded_row_index.append(self._row_index)
+            self._row_index = torch.arange(
+                max(1 << 14, 1 << (rows - 1).bit_length()),
+                dtype=torch.int64,
+                device=device,
+            )
+
+    def live_route_weights(
+        self, rows: int, top_k: int, device: torch.device, capturing: bool
+    ) -> torch.Tensor | None:
+        """``[rows * top_k]`` int64: 1 for a real row's routes, 0 for filler.
+
+        A request's rows are contiguous and the real requests come first, so
+        row ``i`` of a forward with ``rows`` rows is real iff
+        ``i * replayed < live * rows``. None when the buffers cannot be made
+        now (under capture, like ``ones``).
+        """
+        if (
+            self._live_marks is None
+            or self._row_index is None
+            or self._row_index.numel() < rows
+        ):
+            if capturing:
+                return None
+            self.reserve_live_rows(rows, device)
+        marks = self._live_marks
+        live = self._row_index[:rows] * marks[1] < marks[0] * rows
+        return live.to(torch.int64).unsqueeze(1).expand(rows, top_k).reshape(-1)
+
+    def mark_live_requests(self, live: int, replayed: int) -> tuple[int, int]:
+        """Say how many of the requests the next forwards carry are real.
+
+        Args:
+            live: This rank's real requests (0 on an idle rank, and for
+                warm-up and capture forwards).
+            replayed: Requests the forward is laid out for.
+
+        Returns:
+            The marks that were in force, to restore after the forward.
+        """
+        previous = self._live_marks_host
+        if (live, replayed) != previous:
+            self._live_marks_host = (live, replayed)
+            if self._live_marks is not None:
+                # Device fills on the current stream, ahead of the replay.
+                self._live_marks[0] = live
+                self._live_marks[1] = replayed
+        return previous
 
     def forward_done(self, counter: LayerLoadCounter, capturing: bool) -> None:
         """Called after every recorded launch; the first layer paces the writes."""
@@ -617,6 +701,8 @@ class ExpertLoadProfile:
             # What the counts stand for.
             "coverage": {
                 "trigger": trigger,
+                # False: the filler rows of padded graph replays are counted.
+                "live_rows_only": self.live_rows_only,
                 # Python executions of the first registered layer, the one
                 # that paces the writes, per forward kind.
                 "eager_forwards": {
