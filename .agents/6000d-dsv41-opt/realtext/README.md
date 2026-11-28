@@ -11,9 +11,11 @@ DSpark acceptance, through the HTTP gateway of `ts serve`. Only the decode windo
 | `loads_sampler.py` | Samples the gateway's per-rank load once a second while a wave runs |
 | `check_spread.py` | Says per wave whether the gateway spread the requests evenly over the ranks, and prints `EVEN_RESULT`: the median of the first three valid waves that were spread evenly |
 | `show.py` | Prints a run directory: per CC level the result of all waves, the `EVEN_RESULT` and every wave |
+| `collect.py` | One line per CC level of run directories, for tables: throughput, TPOT, accept and step time (TPOT x accept) by the same selection rule, and the mean over the parts of a level measured on several parts of the prompt set |
 
 `make_prompts.py` and `bench_closed_wave.py` are the files of the reproduction package of the MegaMoE kernels'
-authors (reformatted by this repository's code-style hooks, no functional change); the rest is ours.
+authors (reformatted by this repository's code-style hooks); `bench_closed_wave.py` has one addition, `--offset`,
+the index of the first prompt of the bank (default 0, the original behaviour). The rest is ours.
 
 ## Steps
 
@@ -44,3 +46,12 @@ authors (reformatted by this repository's code-style hooks, no functional change
 
 Our two-node runs took one engine start for all concurrency levels; an engine on the persistent kernel was
 ready after 5 to 11 minutes, one on the split kernels after 8 to 12.
+
+## One node against two
+
+To compare an engine on one node (`realtext-engine.sh dep8`, `--dp 8`) with one on two nodes at the same load
+per GPU, give both the same prompts: the two-node engine at CC = 2N serves the prompts 0 to 2N - 1 of the bank,
+so measure the one-node engine at CC = N twice, with `--offset 0` and `--offset N`, into `cc<N>-h0` and
+`cc<N>-h1`, and average the two (`collect.py` does). The acceptance length depends on the prompts, so one half
+alone is not comparable. Each layout needs its own placement file, solved from a profile recorded at that EP
+size.

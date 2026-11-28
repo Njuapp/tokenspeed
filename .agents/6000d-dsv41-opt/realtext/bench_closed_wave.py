@@ -32,6 +32,9 @@ p.add_argument(
 p.add_argument("--waves", type=int, default=3)
 p.add_argument("--max-tokens", type=int, default=1024)
 p.add_argument("--out", required=True)
+p.add_argument(
+    "--offset", type=int, default=0, help="index of the first prompt of the bank"
+)
 a = p.parse_args()
 os.makedirs(a.out, exist_ok=True)
 bank = json.load(open(a.bank))["prompts"]
@@ -48,7 +51,7 @@ def post(path, body, timeout=600):
 
 
 def one(i, max_tokens, tag, barrier, results):
-    item = bank[i % len(bank)]
+    item = bank[(i + a.offset) % len(bank)]
     payload = {
         "input_ids": item["prompt_token_ids"],
         "rid": f"{tag}-{i:04d}",

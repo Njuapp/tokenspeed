@@ -12,6 +12,7 @@
 #   real acceptance               neither a synthetic nor a simulated acceptance length
 #   --disable-prefix-caching      every request prefills its own 8192-token prompt
 #   CUDA graph capture sizes      1 to 24 requests per rank
+#   --max-num-seqs                1024 on two nodes, 512 on one (as measured; the only other difference is the topology)
 # Environment: the variables of env.sh, plus
 #   OPT_MODEL             model directory
 #   OPT_EXTRA_ENV         optional: a file of ../switch-sets, sourced before the engine starts (unset = baseline)
@@ -51,11 +52,13 @@ case "$layout" in
         topology=(--world-size 16 --nprocs-per-node 8 --nnodes 2 --node-rank "$node"
             --tensor-parallel-size 1 --data-parallel-size 16 --dense-tp-size 1 --moe-tp-size 1
             --expert-parallel-size 16 --dist-init-addr "$master_ip:31487")
+        max_num_seqs=1024
         ;;
     dep8)
         topology=(--world-size 8 --nprocs-per-node 8 --nnodes 1 --node-rank 0
             --tensor-parallel-size 1 --data-parallel-size 8 --dense-tp-size 1 --moe-tp-size 1
             --expert-parallel-size 8 --dist-init-addr "$self_ip:31487")
+        max_num_seqs=512
         ;;
     *) exit 2 ;;
 esac
@@ -67,7 +70,7 @@ command=(ts serve --model "$OPT_MODEL" --served-model-name deepseek-v4.1-flash -
     --deepseek-v4-mega-moe-max-num-tokens 2048
     --engram-host-table --engram-host-table-layout shared --engram-host-table-dir /dev/shm
     --max-model-len 131072 --gpu-memory-utilization 0.98
-    --max-total-tokens "${OPT_MAX_TOTAL_TOKENS:-786432}" --max-num-seqs 1024
+    --max-total-tokens "${OPT_MAX_TOTAL_TOKENS:-786432}" --max-num-seqs "$max_num_seqs"
     --chunked-prefill-size 2048 --max-cudagraph-capture-size 24
     --cudagraph-capture-sizes 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24
     --disable-prefill-graph --disable-kvstore --disable-prefix-caching
