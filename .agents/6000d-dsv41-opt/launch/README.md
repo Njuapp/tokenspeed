@@ -111,9 +111,28 @@ the full results and the method (Chinese), `../results/ep16-split-20261126/` the
 
 *Two nodes (EP16), real text, static placement.* The workload of `../realtext/` (8192-token prompts, 1024 output
 tokens, greedy, the real DSpark acceptance, closed waves), `d7-same.sh`, both backends with the same placement
-file (a permutation solved from a held-out prompt bank; real text needs no replicas: the busiest rank receives
-1.99 times the mean without a placement and 1.01 times with it). Output tokens per second of the 16 GPUs,
-2026-11-26:
+file, a permutation solved from a held-out prompt bank (the busiest rank receives 1.60 times the mean without a
+placement and 1.00 times with it). The split backend ran with `../switch-sets/d7-same-split-ep16.sh`. Output
+tokens per second of the 16 GPUs, 2026-11-27, every level the median of three evenly spread waves:
+
+| Requests per GPU | 1 | 2 | 4 | 8 | 12 | 16 | 24 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `mega_moe` | 1711 | 2965 | 5468 | 9776 | 13399 | 16503 | 22029 |
+| `mega_moe_split` | 2013 | 3585 | 6364 | 10606 | 14278 | 16608 | 20551 |
+| Difference | +17.6% | +20.9% | +16.4% | +8.5% | +6.6% | +0.6% | -6.7% |
+
+TPOT goes from 9.35 / 10.79 / 11.70 / 13.09 / 14.33 / 15.51 / 17.43 ms to 7.95 / 8.93 / 10.06 / 12.07 / 13.45 /
+15.41 / 18.69 ms. So on real text the split backend is ahead up to 12 requests per GPU, level at 16 and behind at
+24. Replicas bring nothing on top of this permutation: a file with 4 replica slots per rank reads 2% to 3% less on
+the split backend and between 2% less and 1% more on the persistent kernel, and holds about 3 GB more per GPU.
+
+*The readings of 2026-11-26, whose placement did not balance the traffic.* The load profile behind that day's
+placement counted the filler rows of padded CUDA graph replays (`../docs/LOAD_PROFILE_FILLER_ROWS.md`). On real
+traffic the busiest rank of that permutation receives 1.45 times the mean, not the 1.01 stated here before, and
+the table above supersedes the first two rows below (2% to 5% more output on the persistent kernel, 4% to 11% on
+the split backend against its rerun with the same compile buckets, quoted under the rows; the two days are
+different sessions). The rows remain the comparison of the kernel table, the
+packed dispatch and the compile buckets, which all ran with that one placement:
 
 | Requests per GPU | 1 | 2 | 4 | 8 | 16 | 24 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -124,7 +143,7 @@ file (a permutation solved from a held-out prompt bank; real text needs no repli
 TPOT goes from 9.73 / 11.17 / 12.01 / 13.54 / 15.91 / 18.32 ms to 8.42 / 9.59 / 10.49 / 12.81 / 16.60 / 20.32 ms.
 The split run used the tuned table and the packed dispatch with the default compile buckets; without the table
 it reads 1766 / 3068 / 5508 / 9155 / 13902 / 16272 tokens per second, without the packed dispatch 1899 / 3336 /
-5709 / 8978 / 13080 / 15818. So on real text the split backend is ahead up to 8 requests per GPU and behind
+5709 / 8978 / 13080 / 15818. With that placement the split backend was ahead up to 8 requests per GPU and behind
 from 16. A rerun with compile buckets at the six decode row counts and every bucket packing (see "Compile
 buckets" below) reads 1924 / 3437 / 6122 / 10032 / 14998 / 18916: 1.2% and 3.0% more at 1 and 2 requests per GPU,
 2.7% less at 16, no change elsewhere. At 12 requests per GPU, measured in that run and in one more of the
@@ -149,15 +168,36 @@ inputs (another seed of the request tails), so the measured inputs took no part 
 | `mega_moe_split`, permutation | 25.52 | 27.10 | 31.21 | 39.94 | 53.72 | 90.19 |
 | `mega_moe_split`, 4 replicas per rank | 26.53 | 28.11 | 31.14 | 37.53 | 47.94 | 70.01 |
 
-The split backend leads at low concurrency and the persistent kernel at high, and the better the placement
-balances the load the later they cross. Without a placement the split backend's step is 14.9% / 9.3% / 1.3%
-shorter at 1 / 2 / 4 requests per rank and 16.2% / 17.2% / 33.6% longer from 8. With the permutation it is 17.1% /
-15.4% / 10.4% shorter up to 4 and 3.8% / 11.5% / 31.0% longer from 8. With 4 replica slots per rank it is 17.7% /
-16.3% / 13.4% / 3.0% shorter up to 8 and 6.0% / 16.7% longer at 16 and 32. Replicas cost both backends 1.0 to 1.6 ms
-at 1 and 2 requests per rank against the permutation and pay from 8 (split) or 16 (persistent) requests per rank. The two formal rounds of a run differ by at
-most 1.2%. Earlier runs of the day, with placements solved from the measured inputs themselves, read the same
-within 0.5% on the persistent kernel; they and the readings with other compile buckets, without the packed
-dispatch and on FlashInfer `0dc6f0785abd` are in section 5.2 of `../docs/EP16_SPLIT_RESULTS.md`.
+The split backend leads at low concurrency and the persistent kernel at high, and the better the placement balances
+the load the later they cross. Without a placement the split backend's step is 14.9% / 9.3% / 1.3% shorter at 1 / 2
+/ 4 requests per rank and 16.2% / 17.2% / 33.6% longer from 8. With the permutation it is 17.1% / 15.4% / 10.4%
+shorter up to 4 and 3.8% / 11.5% / 31.0% longer from 8. With 4 replica slots per rank it is 17.7% / 16.3% / 13.4% /
+3.0% shorter up to 8 and 6.0% / 16.7% longer at 16 and 32. Replicas cost both backends 1.0 to 1.6 ms at 1 and 2
+requests per rank against the permutation and pay from 8 (split) or 16 (persistent) requests per rank. The two
+formal rounds of a run differ by at most 1.2%. Earlier runs of the day, with placements solved from the measured
+inputs themselves, read the same within 0.5% on the persistent kernel; they and the readings with other compile
+buckets, without the packed dispatch and on FlashInfer `0dc6f0785abd` are in section 5.2 of
+`../docs/EP16_SPLIT_RESULTS.md`.
+
+*One node (EP8) against two (EP16), the same load per GPU.* `../docs/EP8_VS_EP16.md` (Chinese) and
+`../results/ep8-vs-ep16-20261127/`: both layouts with the same code, FlashInfer, switch set and prompts, each
+with a placement solved from its own profile, 2026-11-27. EP16 gives more output per GPU than EP8.
+With a permutation placement the persistent kernel gives 2.1% / 9.4% / 17.8% / 21.5% / 18.4% / 17.3% / 14.3% more
+at 1 / 2 / 4 / 8 / 12 / 16 / 24 requests per GPU, and the split kernels (kernel table and packed dispatch on both
+sides) 6.6% / 14.9% / 22.3% / 21.5% / 19.5% / 15.5% / 9.2% more. With replica slots (4 per rank at EP16, 3 at EP8)
+the differences are 0.8% to 20.5% and 5.4% to 19.6%. Replicas bring no gain in either layout once the placement
+is solved from a profile of real rows: the EP16 split engine loses 2% to 3% at every level against its
+permutation, the others are within -2% to +1%.
+Two settings differ between the layouts by default and must be checked before comparing split runs:
+
+- FlashInfer selects a tuned kernel table by the exact number of expert slots, so a placement with replicas needs
+  a table registered for its slot count (this branch registers 448 slots at EP16 and 408, 416 and 448 at EP8).
+  The EP8 real-text placement has 408 slots; without a table for them the split backend loses 11.9% of its output
+  at 24 requests per GPU and nothing up to 8. The `[FlashInfer MegaMoE compile]` log lines show which
+  configuration a bucket got.
+- FlashInfer's rule turns the packed dispatch on at EP16 only. On one node of two NUMA nodes `MEGAMOE_XNUMA_PACK=1`
+  forces it for EP8: on real text 0.6% to 1.3% more output up to 8 requests per GPU and 3.0% to 4.9% more from 12 to
+  24.
 
 *One node (EP8), earlier readings* (FlashInfer `0dc6f0785abd`, no expert placement, `d7-same.sh`). Real text,
 output tokens per second of the node:

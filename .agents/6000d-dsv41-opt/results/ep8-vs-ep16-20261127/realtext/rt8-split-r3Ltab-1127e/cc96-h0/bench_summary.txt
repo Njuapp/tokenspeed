@@ -1,0 +1,14 @@
+{"smoke_17_plus_26": "PASS", "reply": "43"}
+{"discarded_wave": {"status": "VALID", "throughput_tok_s": 5563.928743361338, "tpot_ms": 17.253995230356505, "accept": 3.295090152565881, "window_s": 10.674831174081191, "min_cycles": 187, "prefill_spread_s": 18.4590837249998}}
+{"status": "VALID", "throughput_tok_s": 5566.02217409854, "tpot_ms": 17.247505848384073, "accept": 3.296166860819881, "window_s": 10.675487474072725, "min_cycles": 187, "prefill_spread_s": 18.45529964682646, "wave": 1}
+{"status": "VALID", "throughput_tok_s": 5565.78133156119, "tpot_ms": 17.248252182604556, "accept": 3.296000443778776, "window_s": 10.67541041597724, "min_cycles": 187, "prefill_spread_s": 18.451797471847385, "wave": 2}
+{"status": "VALID", "throughput_tok_s": 5561.764126370445, "tpot_ms": 17.260710418269515, "accept": 3.2954923948040413, "window_s": 10.67377160396427, "min_cycles": 187, "prefill_spread_s": 18.463233686983585, "wave": 3}
+{"status": "VALID", "throughput_tok_s": 5565.253825892295, "tpot_ms": 17.249887067748976, "accept": 3.295207455069891, "window_s": 10.674445741111413, "min_cycles": 187, "prefill_spread_s": 18.45501930685714, "wave": 4}
+RESULT {"cc": 96, "dp": 8, "valid_waves": 4, "median_throughput_tok_s": 5565.8, "median_tpot_ms": 17.25, "median_accept": 3.296, "throughput_per_gpu": 695.7}
+SPREAD warmup32: 10 samples with all 96 running; per-rank counts [((12, 12, 12, 12, 12, 12, 12, 12), 10)]; even
+SPREAD warmup1024: 20 samples with all 96 running; per-rank counts [((12, 12, 12, 12, 12, 12, 12, 12), 20)]; even
+SPREAD wave1: 30 samples with all 96 running; per-rank counts [((12, 12, 12, 12, 12, 12, 12, 12), 30)]; even
+SPREAD wave2: 30 samples with all 96 running; per-rank counts [((12, 12, 12, 12, 12, 12, 12, 12), 30)]; even
+SPREAD wave3: 30 samples with all 96 running; per-rank counts [((12, 12, 12, 12, 12, 12, 12, 12), 30)]; even
+SPREAD wave4: 30 samples with all 96 running; per-rank counts [((12, 12, 12, 12, 12, 12, 12, 12), 30)]; even
+EVEN_RESULT {"cc": 96, "measured_waves": 4, "uneven_waves": [], "even_valid_waves_used": [1, 2, 3], "median_throughput_tok_s": 5565.8, "median_tpot_ms": 17.25, "median_accept": 3.296, "throughput_per_gpu": 695.7}

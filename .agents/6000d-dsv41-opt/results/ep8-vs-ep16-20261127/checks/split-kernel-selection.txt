@@ -1,0 +1,30 @@
+## rt16-split-r4L-b5-1127c
+[FlashInfer MegaMoE compile] rank=0 capacity=2048 bucket=192 K1=(64, 64, 128) K2=(64, 32, 128)/stage2 bundle=4 tail_reclaim=True rank_cache=False rank_combine=False dispatch_warps=1 k1_ctas_per_sm=1 k2_launch_factor=1 backend=p2p_split green=120/36
+    136 n_cross=12 fsplit=2 pack=True
+## rt16-split-r4-b5-1127e
+[FlashInfer MegaMoE compile] rank=0 capacity=2048 bucket=192 K1=(64, 64, 128) K2=(64, 32, 128)/stage2 bundle=4 tail_reclaim=True rank_cache=False rank_combine=False dispatch_warps=1 k1_ctas_per_sm=1 k2_launch_factor=1 backend=p2p_split green=120/36
+    136 n_cross=12 fsplit=2 pack=True
+## rt16-split-r0L-b5-1127e
+[FlashInfer MegaMoE compile] rank=0 capacity=2048 bucket=192 K1=(64, 128, 128) K2=(64, 32, 128)/stage2 bundle=4 tail_reclaim=True rank_cache=False rank_combine=False dispatch_warps=1 k1_ctas_per_sm=1 k2_launch_factor=1 backend=p2p_split green=120/36
+    136 n_cross=12 fsplit=2 pack=True
+## rt16-split-r0-b5-1127e
+[FlashInfer MegaMoE compile] rank=0 capacity=2048 bucket=192 K1=(64, 128, 128) K2=(64, 32, 128)/stage2 bundle=4 tail_reclaim=True rank_cache=False rank_combine=False dispatch_warps=1 k1_ctas_per_sm=1 k2_launch_factor=1 backend=p2p_split green=120/36
+    136 n_cross=12 fsplit=2 pack=True
+## rt8-split-r8-1127c
+[FlashInfer MegaMoE compile] rank=0 capacity=2048 bucket=192 K1=(64, 32, 128) K2=(64, 32, 128)/stage2 bundle=4 tail_reclaim=False rank_cache=False rank_combine=False dispatch_warps=1 k1_ctas_per_sm=1 k2_launch_factor=1 backend=p2p_split green=104/52
+    136 n_cross=4 fsplit=2 pack=False
+## rt8-split-r8L-1127d
+[FlashInfer MegaMoE compile] rank=0 capacity=2048 bucket=192 K1=(64, 32, 128) K2=(64, 32, 128)/stage2 bundle=4 tail_reclaim=False rank_cache=False rank_combine=False dispatch_warps=1 k1_ctas_per_sm=1 k2_launch_factor=1 backend=p2p_split green=104/52
+    136 n_cross=4 fsplit=2 pack=False
+## rt8-split-r3Ltab-1127e
+[FlashInfer MegaMoE compile] rank=0 capacity=2048 bucket=192 K1=(64, 64, 128) K2=(64, 32, 128)/stage2 bundle=4 tail_reclaim=True rank_cache=False rank_combine=False dispatch_warps=1 k1_ctas_per_sm=1 k2_launch_factor=1 backend=p2p_split green=120/36
+    136 n_cross=4 fsplit=2 pack=False
+## rt8-split-r0L-1127e
+[FlashInfer MegaMoE compile] rank=0 capacity=2048 bucket=192 K1=(64, 64, 128) K2=(64, 32, 128)/stage2 bundle=4 tail_reclaim=True rank_cache=False rank_combine=False dispatch_warps=1 k1_ctas_per_sm=1 k2_launch_factor=1 backend=p2p_split green=120/36
+    136 n_cross=4 fsplit=2 pack=False
+## rt8-splitpack-r3Ltab-1127e
+[FlashInfer MegaMoE compile] rank=0 capacity=2048 bucket=192 K1=(64, 64, 128) K2=(64, 32, 128)/stage2 bundle=4 tail_reclaim=True rank_cache=False rank_combine=False dispatch_warps=1 k1_ctas_per_sm=1 k2_launch_factor=1 backend=p2p_split green=120/36
+    136 n_cross=4 fsplit=2 pack=True
+## rt8-splitpack-r0L-1127e
+[FlashInfer MegaMoE compile] rank=0 capacity=2048 bucket=192 K1=(64, 64, 128) K2=(64, 32, 128)/stage2 bundle=4 tail_reclaim=True rank_cache=False rank_combine=False dispatch_warps=1 k1_ctas_per_sm=1 k2_launch_factor=1 backend=p2p_split green=120/36
+    136 n_cross=4 fsplit=2 pack=True

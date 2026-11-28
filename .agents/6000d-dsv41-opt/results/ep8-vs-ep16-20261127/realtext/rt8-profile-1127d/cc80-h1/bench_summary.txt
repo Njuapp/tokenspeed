@@ -1,0 +1,12 @@
+{"smoke_17_plus_26": "PASS", "reply": "43"}
+{"discarded_wave": {"status": "VALID", "throughput_tok_s": 4789.627713040532, "tpot_ms": 16.7027595447945, "accept": 3.3002635046113307, "window_s": 10.459685595938936, "min_cycles": 189, "prefill_spread_s": 11.343055935110897}}
+{"status": "VALID", "throughput_tok_s": 4793.41475221643, "tpot_ms": 16.6895635231666, "accept": 3.2997235750954323, "window_s": 10.459349459968507, "min_cycles": 189, "prefill_spread_s": 11.343598014907911, "wave": 1}
+{"status": "VALID", "throughput_tok_s": 4791.810040295674, "tpot_ms": 16.695152630688106, "accept": 3.300296345077379, "window_s": 10.458469676086679, "min_cycles": 189, "prefill_spread_s": 11.336073995800689, "wave": 2}
+{"status": "VALID", "throughput_tok_s": 4784.522858045424, "tpot_ms": 16.720580583176822, "accept": 3.300085757635728, "window_s": 10.455797053175047, "min_cycles": 189, "prefill_spread_s": 11.343734699999914, "wave": 3}
+RESULT {"cc": 80, "dp": 8, "valid_waves": 3, "median_throughput_tok_s": 4791.8, "median_tpot_ms": 16.7, "median_accept": 3.3, "throughput_per_gpu": 599.0}
+SPREAD warmup32: 10 samples with all 80 running; per-rank counts [((10, 10, 10, 10, 10, 10, 10, 10), 10)]; even
+SPREAD warmup1024: 20 samples with all 80 running; per-rank counts [((10, 10, 10, 10, 10, 10, 10, 10), 20)]; even
+SPREAD wave1: 20 samples with all 80 running; per-rank counts [((10, 10, 10, 10, 10, 10, 10, 10), 20)]; even
+SPREAD wave2: 20 samples with all 80 running; per-rank counts [((10, 10, 10, 10, 10, 10, 10, 10), 20)]; even
+SPREAD wave3: 20 samples with all 80 running; per-rank counts [((10, 10, 10, 10, 10, 10, 10, 10), 20)]; even
+EVEN_RESULT {"cc": 80, "measured_waves": 3, "uneven_waves": [], "even_valid_waves_used": [1, 2, 3], "median_throughput_tok_s": 4791.8, "median_tpot_ms": 16.7, "median_accept": 3.3, "throughput_per_gpu": 599.0}

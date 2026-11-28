@@ -1,0 +1,14 @@
+{"smoke_17_plus_26": "PASS", "reply": "43"}
+{"discarded_wave": {"status": "VALID", "throughput_tok_s": 4165.596711576452, "tpot_ms": 15.36394529555394, "accept": 3.2657809920603724, "window_s": 9.97312098997645, "min_cycles": 198, "prefill_spread_s": 11.872925604926422}}
+{"status": "VALID", "throughput_tok_s": 4167.611922038088, "tpot_ms": 15.35651620093794, "accept": 3.2660117878192536, "window_s": 9.972137707984075, "min_cycles": 198, "prefill_spread_s": 11.859349257079884, "wave": 1}
+{"status": "VALID", "throughput_tok_s": 4170.502102767764, "tpot_ms": 15.345874051358527, "accept": 3.2649874450721907, "window_s": 9.976976146921515, "min_cycles": 199, "prefill_spread_s": 12.369888947112486, "wave": 2}
+{"status": "VALID", "throughput_tok_s": 4169.830597647375, "tpot_ms": 15.348345334726284, "accept": 3.265389447236181, "window_s": 9.973546652821824, "min_cycles": 199, "prefill_spread_s": 11.865472704172134, "wave": 3}
+{"status": "VALID", "throughput_tok_s": 4163.854332307139, "tpot_ms": 15.37037439168493, "accept": 3.2660059776624193, "window_s": 9.972491035005078, "min_cycles": 198, "prefill_spread_s": 11.873228264972568, "wave": 4}
+RESULT {"cc": 64, "dp": 8, "valid_waves": 4, "median_throughput_tok_s": 4169.8, "median_tpot_ms": 15.35, "median_accept": 3.265, "throughput_per_gpu": 521.2}
+SPREAD warmup32: 10 samples with all 64 running; per-rank counts [((8, 8, 8, 8, 8, 8, 8, 8), 10)]; even
+SPREAD warmup1024: 29 samples with all 64 running; per-rank counts [((8, 8, 8, 8, 8, 8, 8, 8), 29)]; even
+SPREAD wave1: 20 samples with all 64 running; per-rank counts [((8, 8, 8, 8, 8, 8, 8, 8), 20)]; even
+SPREAD wave2: 30 samples with all 64 running; per-rank counts [((8, 8, 8, 8, 8, 8, 8, 8), 30)]; even
+SPREAD wave3: 20 samples with all 64 running; per-rank counts [((8, 8, 8, 8, 8, 8, 8, 8), 20)]; even
+SPREAD wave4: 20 samples with all 64 running; per-rank counts [((8, 8, 8, 8, 8, 8, 8, 8), 20)]; even
+EVEN_RESULT {"cc": 64, "measured_waves": 4, "uneven_waves": [], "even_valid_waves_used": [1, 2, 3], "median_throughput_tok_s": 4169.8, "median_tpot_ms": 15.35, "median_accept": 3.265, "throughput_per_gpu": 521.2}

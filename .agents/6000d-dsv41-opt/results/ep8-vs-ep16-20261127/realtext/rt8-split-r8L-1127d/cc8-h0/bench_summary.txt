@@ -1,0 +1,14 @@
+{"smoke_17_plus_26": "PASS", "reply": "43"}
+{"discarded_wave": {"status": "VALID", "throughput_tok_s": 857.3997709137385, "tpot_ms": 9.3305366660809, "accept": 3.335093896713615, "window_s": 6.628179984167218, "min_cycles": 213, "prefill_spread_s": 1.952920130919665}}
+{"status": "VALID", "throughput_tok_s": 857.3540980217616, "tpot_ms": 9.331033721608154, "accept": 3.335093896713615, "window_s": 6.628533079987392, "min_cycles": 213, "prefill_spread_s": 1.6364581778179854, "wave": 1}
+{"status": "VALID", "throughput_tok_s": 857.3380610878121, "tpot_ms": 9.331208263225125, "accept": 3.335093896713615, "window_s": 6.628657069988549, "min_cycles": 213, "prefill_spread_s": 1.5209150549490005, "wave": 2}
+{"status": "VALID", "throughput_tok_s": 857.5289982772538, "tpot_ms": 9.329130578757947, "accept": 3.335093896713615, "window_s": 6.627181134885177, "min_cycles": 213, "prefill_spread_s": 1.5016573499888182, "wave": 3}
+{"status": "VALID", "throughput_tok_s": 857.6527524266972, "tpot_ms": 9.327784441155574, "accept": 3.3335290663534938, "window_s": 6.619229034055024, "min_cycles": 212, "prefill_spread_s": 1.4979373048990965, "wave": 4}
+RESULT {"cc": 8, "dp": 8, "valid_waves": 4, "median_throughput_tok_s": 857.5, "median_tpot_ms": 9.33, "median_accept": 3.335, "throughput_per_gpu": 107.2}
+SPREAD warmup32: 0 samples with all 8 running; per-rank counts []; no sample
+SPREAD warmup1024: 10 samples with all 8 running; per-rank counts [((1, 1, 1, 1, 1, 1, 1, 1), 10)]; even
+SPREAD wave1: 10 samples with all 8 running; per-rank counts [((1, 1, 1, 1, 1, 1, 1, 1), 10)]; even
+SPREAD wave2: 0 samples with all 8 running; per-rank counts []; no sample
+SPREAD wave3: 10 samples with all 8 running; per-rank counts [((1, 1, 1, 1, 1, 1, 1, 1), 10)]; even
+SPREAD wave4: 0 samples with all 8 running; per-rank counts []; no sample
+EVEN_RESULT {"cc": 8, "measured_waves": 4, "uneven_waves": ["wave2", "wave4"], "even_valid_waves_used": [1, 3], "status": "fewer than 3 evenly spread valid waves: run again or raise WAVES"}

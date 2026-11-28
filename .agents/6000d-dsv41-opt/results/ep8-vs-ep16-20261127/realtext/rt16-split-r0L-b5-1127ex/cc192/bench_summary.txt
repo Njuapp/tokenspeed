@@ -1,0 +1,20 @@
+{"smoke_17_plus_26": "PASS", "reply": "43"}
+{"discarded_wave": {"status": "VALID", "throughput_tok_s": 14232.400437669614, "tpot_ms": 13.49034555631416, "accept": 3.358965758211041, "window_s": 8.443199762841687, "min_cycles": 186, "prefill_spread_s": 19.292662488063797}}
+{"status": "VALID", "throughput_tok_s": 11508.514828159898, "tpot_ms": 16.683299527946037, "accept": 3.3442270479466782, "window_s": 9.460647322935984, "min_cycles": 168, "prefill_spread_s": 28.43087047408335, "wave": 1}
+{"status": "VALID", "throughput_tok_s": 14226.358640986462, "tpot_ms": 13.496074775371095, "accept": 3.3462817244818797, "window_s": 8.489452786045149, "min_cycles": 187, "prefill_spread_s": 19.21913477499038, "wave": 2}
+{"status": "VALID", "throughput_tok_s": 14278.444443176397, "tpot_ms": 13.446842950161559, "accept": 3.3589799240368965, "window_s": 8.671252704923972, "min_cycles": 191, "prefill_spread_s": 19.185644367011264, "wave": 3}
+{"status": "VALID", "throughput_tok_s": 14281.858671271106, "tpot_ms": 13.443628341332111, "accept": 3.36274807474675, "window_s": 8.53033227706328, "min_cycles": 188, "prefill_spread_s": 19.152480454882607, "wave": 4}
+{"status": "VALID", "throughput_tok_s": 11594.18850198525, "tpot_ms": 16.56002056264, "accept": 3.372156304382218, "window_s": 9.19227766408585, "min_cycles": 163, "prefill_spread_s": 28.12137959105894, "wave": 5}
+{"status": "VALID", "throughput_tok_s": 14225.304665900965, "tpot_ms": 13.497074720672748, "accept": 3.352892171836383, "window_s": 8.487761973170564, "min_cycles": 187, "prefill_spread_s": 19.167113803792745, "wave": 6}
+{"status": "VALID", "throughput_tok_s": 10436.529515500344, "tpot_ms": 18.396920136606848, "accept": 3.407475847759839, "window_s": 10.071068149991333, "min_cycles": 159, "prefill_spread_s": 27.805146717932075, "wave": 7}
+RESULT {"cc": 192, "dp": 16, "valid_waves": 7, "median_throughput_tok_s": 14225.3, "median_tpot_ms": 13.5, "median_accept": 3.353, "throughput_per_gpu": 889.1}
+SPREAD warmup32: 18 samples with all 192 running; per-rank counts [((12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12), 18)]; even
+SPREAD warmup1024: 32 samples with all 192 running; per-rank counts [((12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12), 32)]; even
+SPREAD wave1: 40 samples with all 192 running; per-rank counts [((10, 16, 16, 16, 16, 16, 9, 9, 9, 13, 9, 12, 11, 10, 10, 10), 40)]; NOT even
+SPREAD wave2: 20 samples with all 192 running; per-rank counts [((12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12), 20)]; even
+SPREAD wave3: 20 samples with all 192 running; per-rank counts [((12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12), 20)]; even
+SPREAD wave4: 20 samples with all 192 running; per-rank counts [((12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12), 20)]; even
+SPREAD wave5: 30 samples with all 192 running; per-rank counts [((9, 15, 15, 15, 15, 16, 16, 10, 10, 10, 16, 9, 9, 9, 9, 9), 30)]; NOT even
+SPREAD wave6: 30 samples with all 192 running; per-rank counts [((12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12), 30)]; even
+SPREAD wave7: 40 samples with all 192 running; per-rank counts [((11, 18, 11, 11, 12, 12, 11, 11, 11, 11, 11, 11, 18, 11, 11, 11), 40)]; NOT even
+EVEN_RESULT {"cc": 192, "measured_waves": 7, "uneven_waves": ["wave1", "wave5", "wave7"], "even_valid_waves_used": [2, 3, 4], "median_throughput_tok_s": 14278.4, "median_tpot_ms": 13.45, "median_accept": 3.359, "throughput_per_gpu": 892.4}

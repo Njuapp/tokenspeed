@@ -1,0 +1,5 @@
+# EP8 (one node), split kernels, balanced routes, no placement: FlashInfer's rule (no packed dispatch at EP8)
+# against MEGAMOE_XNUMA_PACK=1. Decode step in ms per number of requests per rank, the method of
+# steptime-balanced.txt. e8b-split-1127a is the run of that file; e8b-splitpack-1127b differs in that one variable.
+e8b-split-1127a B1=40.83 B2=48.78 B4=49.39 B8=52.81 B16=61.31 B32=76.33
+e8b-splitpack-1127b B1=40.41 B2=48.47 B4=49.10 B8=52.59 B16=60.05 B32=75.98

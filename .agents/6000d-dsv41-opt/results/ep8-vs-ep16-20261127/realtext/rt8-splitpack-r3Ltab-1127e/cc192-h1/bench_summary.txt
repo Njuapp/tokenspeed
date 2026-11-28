@@ -1,0 +1,14 @@
+{"smoke_17_plus_26": "PASS", "reply": "43"}
+{"discarded_wave": {"status": "VALID", "throughput_tok_s": 9333.656184071004, "tpot_ms": 20.57071700666143, "accept": 3.2949916390251928, "window_s": 12.877911681076512, "min_cycles": 189, "prefill_spread_s": 32.8060015689116}}
+{"status": "VALID", "throughput_tok_s": 8005.602411988159, "tpot_ms": 23.983204525931182, "accept": 3.331493038886222, "window_s": 10.401965487981215, "min_cycles": 129, "prefill_spread_s": 47.64011897309683, "wave": 1}
+{"status": "VALID", "throughput_tok_s": 9310.061870390993, "tpot_ms": 20.622848985635862, "accept": 3.2881258234519106, "window_s": 12.867046606959775, "min_cycles": 189, "prefill_spread_s": 32.78440724709071, "wave": 2}
+{"status": "VALID", "throughput_tok_s": 9380.238558137144, "tpot_ms": 20.468562586123607, "accept": 3.3184531176939793, "window_s": 12.862039622152224, "min_cycles": 189, "prefill_spread_s": 32.82304410287179, "wave": 3}
+{"status": "VALID", "throughput_tok_s": 7931.74149208014, "tpot_ms": 24.206537768750078, "accept": 3.291977937582909, "window_s": 11.889192315982655, "min_cycles": 148, "prefill_spread_s": 39.39649788103998, "wave": 4}
+RESULT {"cc": 192, "dp": 8, "valid_waves": 4, "median_throughput_tok_s": 9310.1, "median_tpot_ms": 20.62, "median_accept": 3.288, "throughput_per_gpu": 1163.8}
+SPREAD warmup32: 30 samples with all 192 running; per-rank counts [((24, 24, 24, 24, 24, 24, 24, 24), 30)]; even
+SPREAD warmup1024: 40 samples with all 192 running; per-rank counts [((24, 24, 24, 24, 24, 24, 24, 24), 40)]; even
+SPREAD wave1: 50 samples with all 192 running; per-rank counts [((23, 22, 22, 22, 22, 22, 36, 23), 50)]; NOT even
+SPREAD wave2: 40 samples with all 192 running; per-rank counts [((24, 24, 24, 24, 24, 24, 24, 24), 40)]; even
+SPREAD wave3: 40 samples with all 192 running; per-rank counts [((24, 24, 24, 24, 24, 24, 24, 24), 40)]; even
+SPREAD wave4: 49 samples with all 192 running; per-rank counts [((27, 19, 18, 18, 28, 28, 27, 27), 49)]; NOT even
+EVEN_RESULT {"cc": 192, "measured_waves": 4, "uneven_waves": ["wave1", "wave4"], "even_valid_waves_used": [2, 3], "status": "fewer than 3 evenly spread valid waves: run again or raise WAVES"}

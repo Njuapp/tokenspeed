@@ -1,0 +1,5 @@
+none                     busiest rank / mean: mean over layers 1.302, worst layer 1.664; routes that cross ranks 87.5%
+realtext-ep8-old-r0.json              busiest rank / mean: mean over layers 1.205, worst layer 1.219; routes that cross ranks 87.5%
+realtext-ep8-old-r3.json              busiest rank / mean: mean over layers 1.185, worst layer 1.219; routes that cross ranks 84.9%
+realtext-ep8-r0.json             busiest rank / mean: mean over layers 1.000, worst layer 1.000; routes that cross ranks 87.5%
+realtext-ep8-r3.json             busiest rank / mean: mean over layers 1.000, worst layer 1.000; routes that cross ranks 84.3%

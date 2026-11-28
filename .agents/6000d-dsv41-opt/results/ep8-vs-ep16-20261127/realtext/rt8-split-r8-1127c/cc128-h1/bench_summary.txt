@@ -1,0 +1,14 @@
+{"smoke_17_plus_26": "PASS", "reply": "43"}
+{"discarded_wave": {"status": "VALID", "throughput_tok_s": 6663.969008344179, "tpot_ms": 19.207772401061124, "accept": 3.3056545248773945, "window_s": 11.834238709881902, "min_cycles": 186, "prefill_spread_s": 24.221626444952562}}
+{"status": "VALID", "throughput_tok_s": 6731.662020867871, "tpot_ms": 19.014620698901005, "accept": 3.3329809725158563, "window_s": 11.709589660866186, "min_cycles": 184, "prefill_spread_s": 24.208833072101697, "wave": 1}
+{"status": "VALID", "throughput_tok_s": 6671.06710201995, "tpot_ms": 19.187335105839747, "accept": 3.3037566934404285, "window_s": 11.83813605713658, "min_cycles": 186, "prefill_spread_s": 24.20291754603386, "wave": 2}
+{"status": "VALID", "throughput_tok_s": 5438.86828584866, "tpot_ms": 23.534307740645602, "accept": 3.3711928287664255, "window_s": 12.16981116682291, "min_cycles": 152, "prefill_spread_s": 38.00231394194998, "wave": 3}
+{"status": "VALID", "throughput_tok_s": 5219.07287155378, "tpot_ms": 24.52542877829044, "accept": 3.281709990604447, "window_s": 12.046392443124205, "min_cycles": 148, "prefill_spread_s": 35.18935139384121, "wave": 4}
+RESULT {"cc": 128, "dp": 8, "valid_waves": 4, "median_throughput_tok_s": 6671.1, "median_tpot_ms": 19.19, "median_accept": 3.304, "throughput_per_gpu": 833.9}
+SPREAD warmup32: 19 samples with all 128 running; per-rank counts [((14, 14, 14, 14, 18, 18, 18, 18), 19)]; NOT even
+SPREAD warmup1024: 41 samples with all 128 running; per-rank counts [((16, 16, 16, 16, 16, 16, 16, 16), 40), ((14, 14, 14, 14, 18, 18, 18, 18), 1)]; NOT even
+SPREAD wave1: 30 samples with all 128 running; per-rank counts [((16, 16, 16, 16, 16, 16, 16, 16), 30)]; even
+SPREAD wave2: 30 samples with all 128 running; per-rank counts [((16, 16, 16, 16, 16, 16, 16, 16), 30)]; even
+SPREAD wave3: 40 samples with all 128 running; per-rank counts [((14, 14, 13, 13, 23, 23, 14, 14), 40)]; NOT even
+SPREAD wave4: 49 samples with all 128 running; per-rank counts [((14, 14, 21, 13, 24, 14, 14, 14), 49)]; NOT even
+EVEN_RESULT {"cc": 128, "measured_waves": 4, "uneven_waves": ["wave3", "wave4"], "even_valid_waves_used": [1, 2], "status": "fewer than 3 evenly spread valid waves: run again or raise WAVES"}

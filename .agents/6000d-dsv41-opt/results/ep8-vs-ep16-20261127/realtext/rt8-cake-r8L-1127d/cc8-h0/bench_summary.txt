@@ -1,0 +1,14 @@
+{"smoke_17_plus_26": "PASS", "reply": "43"}
+{"discarded_wave": {"status": "VALID", "throughput_tok_s": 819.3382933468024, "tpot_ms": 9.763976693096938, "accept": 3.6713021491782554, "window_s": 7.088647079188377, "min_cycles": 197, "prefill_spread_s": 1.1176501449663192}}
+{"status": "VALID", "throughput_tok_s": 819.4971632144178, "tpot_ms": 9.76208382298797, "accept": 3.6719342604298357, "window_s": 7.08849311596714, "min_cycles": 197, "prefill_spread_s": 1.112919536884874, "wave": 1}
+{"status": "VALID", "throughput_tok_s": 820.704578369517, "tpot_ms": 9.747721909744302, "accept": 3.673611111111111, "window_s": 7.090249224100262, "min_cycles": 198, "prefill_spread_s": 1.1075440300628543, "wave": 2}
+{"status": "VALID", "throughput_tok_s": 820.7660706769957, "tpot_ms": 9.74699160432074, "accept": 3.673611111111111, "window_s": 7.089718018192798, "min_cycles": 198, "prefill_spread_s": 1.1119811479002237, "wave": 3}
+{"status": "VALID", "throughput_tok_s": 820.7250339765627, "tpot_ms": 9.747478959230156, "accept": 3.673611111111111, "window_s": 7.090072507970035, "min_cycles": 198, "prefill_spread_s": 1.111760628875345, "wave": 4}
+RESULT {"cc": 8, "dp": 8, "valid_waves": 4, "median_throughput_tok_s": 820.7, "median_tpot_ms": 9.75, "median_accept": 3.674, "throughput_per_gpu": 102.6}
+SPREAD warmup32: 0 samples with all 8 running; per-rank counts []; no sample
+SPREAD warmup1024: 10 samples with all 8 running; per-rank counts [((1, 1, 1, 1, 1, 1, 1, 1), 10)]; even
+SPREAD wave1: 0 samples with all 8 running; per-rank counts []; no sample
+SPREAD wave2: 8 samples with all 8 running; per-rank counts [((1, 1, 1, 1, 1, 1, 1, 1), 8)]; even
+SPREAD wave3: 12 samples with all 8 running; per-rank counts [((1, 1, 1, 1, 1, 1, 1, 1), 12)]; even
+SPREAD wave4: 6 samples with all 8 running; per-rank counts [((1, 1, 1, 1, 1, 1, 1, 1), 6)]; even
+EVEN_RESULT {"cc": 8, "measured_waves": 4, "uneven_waves": ["wave1"], "even_valid_waves_used": [2, 3, 4], "median_throughput_tok_s": 820.7, "median_tpot_ms": 9.75, "median_accept": 3.674, "throughput_per_gpu": 102.6}

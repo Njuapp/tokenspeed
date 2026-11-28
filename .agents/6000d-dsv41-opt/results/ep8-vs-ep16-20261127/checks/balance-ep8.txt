@@ -1,0 +1,5 @@
+e384k6 decode: 40 layers, routes per layer 2558736, busiest expert / mean 1.001..1.001, least busy / mean 0.998, busiest owner rank / mean 1.000, active experts 384..384 of 384
+e384k6 extend: 40 layers, routes per layer 23599104, busiest expert / mean 1.000..1.033, least busy / mean 0.995, busiest owner rank / mean 1.000, active experts 384..384 of 384
+e128k3 decode: 3 layers, routes per layer 1066140, busiest expert / mean 1.017..1.017, least busy / mean 0.950, busiest owner rank / mean 1.000, active experts 128..128 of 128
+EVEN
+exit 0

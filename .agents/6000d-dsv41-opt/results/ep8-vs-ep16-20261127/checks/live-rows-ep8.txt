@@ -1,0 +1,4 @@
+profile <work>/ep8v16-20261127/profiles/rt8-s43-live: 8 ranks, group e384k6, files written 13:57:09 .. 13:57:46 UTC, live_rows_only ['True']
+decode cycles counted 156430; cycles of the requests finished before the earliest file 152614, before the latest 177631, expected from each rank's own write time 155741; counted / expected = 1.004
+REAL ROWS ONLY
+exit 0

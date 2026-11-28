@@ -1,0 +1,4 @@
+profile <work>/eplb16-20261126/profiles/rt16-s43-live: 16 ranks, group e384k6, files written 13:46:58 .. 13:46:59 UTC, live_rows_only ['True']
+decode cycles counted 154476; cycles of the requests finished before the earliest file 153829, before the latest 153829, expected from each rank's own write time 153829; counted / expected = 1.004
+REAL ROWS ONLY
+exit 0
